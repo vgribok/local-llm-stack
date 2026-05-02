@@ -1,0 +1,9 @@
+# Open WebUI runtime data (SQLite, uploads, vectors, cache, secrets)
+open-webui/
+
+# Claude Code per-project state
+.claude/
+
+# .env files with secrets
+.env
+think-router/__pycache__/
