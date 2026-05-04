@@ -83,8 +83,11 @@ services:
     restart: unless-stopped
     networks:
       - ai-net
+    ports:
+      - "11434:11434"
     environment:
       - UPSTREAM_URL=http://ollama-big:11434
+      - SMALL_UPSTREAM_URL=http://ollama-small:11434
       - CLASSIFIER_URL=http://ollama-small:11434
       - CLASSIFIER_MODEL=granite4.1:3b
       # Auto-discovery: router calls upstream /api/show on first use of each model
@@ -121,9 +124,9 @@ services:
       - ./open-webui:/app/backend/data
       - ./patches/tavily.py:/app/backend/open_webui/retrieval/web/tavily.py:ro
     environment:
-      # Big-model traffic goes through think-router (auto-decides 'think' per request).
-      # Small-model traffic goes direct to ollama-small.
-      - OLLAMA_BASE_URLS=http://think-router:11434;http://ollama-small:11434
+      # All model traffic goes through think-router, which now exposes both backends
+      # and routes each request to whichever GPU owns the model.
+      - OLLAMA_BASE_URLS=http://think-router:11434
       # Web search via Tavily (API key in .env)
       - ENABLE_WEB_SEARCH=True
       - WEB_SEARCH_ENGINE=tavily

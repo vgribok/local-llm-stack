@@ -1,17 +1,17 @@
 # ai-stack
 
-Local agentic AI on Windows: Open WebUI + dual-Ollama backends pinned to separate GPUs + Tavily web search + adaptive thinking router.
+Local agentic AI on Windows: Open WebUI + Cline (VS Code) + dual-Ollama backends pinned to separate GPUs + Tavily web search + adaptive thinking router.
 
 ## What it does
 
-A self-hosted ChatGPT-style UI with web-search-grounded agents. The agentic loop (generate search query → fetch sources → embed → answer) runs concurrently on two GPUs instead of fighting for one. A lightweight proxy in front of the big-model backend automatically decides whether to enable extended thinking per request, keeping reasoning latency proportional to question complexity.
+A self-hosted ChatGPT-style UI with web-search-grounded agents. The agentic loop (generate search query → fetch sources → embed → answer) runs concurrently on two GPUs instead of fighting for one. A unified Ollama gateway sits in front of both backends and automatically decides whether to enable extended thinking per request, keeping reasoning latency proportional to question complexity. The same gateway endpoint serves both Open WebUI and VS Code AI coding agents (Cline, Continue.dev, etc.) without any client-side configuration differences.
 
 ## Stack
 
 | Service | Host port | GPU | Role |
 |---|---|---|---|
 | `open-webui` | 3001 | — | UI, agent orchestration |
-| `think-router` | — (internal) | — | Adaptive thinking proxy for `ollama-big` |
+| `think-router` | **11434** | — | Unified Ollama gateway + adaptive thinking proxy |
 | `ollama-big` | 3003 | RTX 3090 Ti (24 GiB) | Chat / reasoning models |
 | `ollama-small` | 3004 | RTX 5060 Ti (16 GiB) | Task model + embeddings |
 
@@ -49,11 +49,25 @@ External: **Tavily** for web search (free tier — 1k queries/month).
 
 `.\ollama.ps1 help` lists all wrapper commands. The wrapper auto-routes pulls to the correct GPU by registry size + name pattern; do **not** use `docker exec ... ollama pull` directly or models will land on the wrong backend.
 
+## Connecting a VS Code AI coding agent (Cline, Continue.dev, etc.)
+
+Any Ollama-native VS Code agent can use the same gateway as Open WebUI:
+
+| Setting | Value |
+|---|---|
+| Provider | Ollama |
+| Base URL | `http://localhost:11434` |
+| Model | `qwen3.6:27b` (or any model visible in `/api/tags`) |
+
+The agent gets model-aware routing, adaptive thinking classification, and the correct context window size automatically — no extra configuration required. Context length is read from `BIG_CONTEXT_LENGTH` in `.env`; increase it there if you need more runway for large codebases.
+
 ## Architecture decisions worth knowing
 
 **Why two Ollama instances** — A single instance with both GPUs visible will split a model that doesn't fit on one GPU across both, which slows inference dramatically (no NVLink between consumer GPUs). Two pinned instances keep each model whole on its assigned GPU.
 
 **Why separate model stores** — Each Ollama bind-mounts its own directory under `~/`. Sharing the store made both backends advertise the same models, and Open WebUI would route by name without regard for VRAM capacity. Separate stores enforce routing structurally: a model only exists where it fits.
+
+**think-router is now a unified gateway for all clients** — It merges `/api/tags` from both backends into a single response, routes `/api/show` and `/api/chat` to whichever backend owns the requested model, and applies adaptive thinking classification only for big-GPU models. All clients (Open WebUI, Cline, anything Ollama-native) connect to `localhost:11434` and get correct GPU routing automatically. On startup the router builds an in-memory model→backend map; a cache miss triggers a single re-fetch, so models pulled after startup are discovered without a restart.
 
 **GPU pinning uses `CUDA_VISIBLE_DEVICES`, not `NVIDIA_VISIBLE_DEVICES`** — Docker Desktop on Windows ignores the NVIDIA-runtime filter and exposes all GPUs to every container with `runtime: nvidia`. Filtering at the CUDA library level inside the container actually works. UUIDs (not indices) are used because PCIe order can change.
 
@@ -78,8 +92,9 @@ The conciseness instruction ("Think briefly and directly — avoid restating the
 |---|---|
 | `docker-compose.yml` | Stack definition; the canonical reference for env vars and tuning |
 | `ollama.ps1` | Wrapper for Ollama operations across both backends |
-| `think-router/app.py` | Thinking proxy — classifier logic and transparent Ollama passthrough |
-| `think-router/Dockerfile` | Python 3.12-slim image for the proxy |
+| `think-router/app.py` | Unified Ollama gateway — model registry, routing, thinking proxy |
+| `think-router/test_app.py` | Unit tests for routing logic and pure helpers |
+| `think-router/Dockerfile` | Python 3.12-slim image for the gateway |
 | `patches/tavily.py` | Bind-mounted over OWUI's Tavily integration — guards against empty and oversized queries |
 | `.env` | Tavily key + tunable defaults (gitignored) |
 | `.gitignore` | Excludes `.env`, `open-webui/` (DB/uploads/vectors), `.claude/` |
@@ -93,6 +108,7 @@ The conciseness instruction ("Think briefly and directly — avoid restating the
 - **Per-chat web search toggle** — `ENABLE_WEB_SEARCH=True` in compose only makes the feature *available*; you still toggle it on per conversation via the `+` icon next to the message input.
 - **think-router is rebuilt on every `.\ollama.ps1 start`** — `--build` is passed to `docker compose up`, so changes to `think-router/app.py` take effect automatically on the next start.
 - **CUDA utilization ~50% during generation is normal** — autoregressive inference on large models is memory-bandwidth-bound, not compute-bound. Near-100% utilization only appears during the KV prefill phase.
+- **Models pulled after stack startup are discovered automatically** — think-router refreshes its model→backend map on the first request for an unknown model. No restart needed.
 
 ## Troubleshooting
 
@@ -105,3 +121,4 @@ The conciseness instruction ("Think briefly and directly — avoid restating the
 | GPU pinning not working | `NVIDIA_VISIBLE_DEVICES` doesn't filter on Docker Desktop | Use `CUDA_VISIBLE_DEVICES=GPU-<UUID>` instead |
 | Thinking always on / always off | think-router classifier not working | Check `docker logs ai-stack-think-router-1`; confirm granite4.1:3b is pulled on ollama-small |
 | think-router changes not taking effect | Image not rebuilt | `.\ollama.ps1 start` rebuilds automatically; or `docker compose up -d --build think-router` |
+| Cline shows wrong/missing models | Model registry stale | Hit `http://localhost:11434/health` to inspect; or restart think-router to force a refresh |

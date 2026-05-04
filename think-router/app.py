@@ -1,14 +1,21 @@
 """
-Transparent proxy in front of ollama-big that auto-decides whether to enable
-per-request 'thinking' on thinking-capable models.
+Unified Ollama gateway and transparent thinking proxy.
 
-For /api/chat to a thinking model, calls a tiny classifier on ollama-small to
-decide whether the user's last message needs deliberation. Sets body['think']
-accordingly, then forwards to the upstream Ollama. Manual overrides via
-'/think' or '/no_think' as the first token of the user message.
+Sits in front of both ollama-big and ollama-small and provides a single
+Ollama-compatible endpoint for all clients (Open WebUI, Cline, etc.):
 
-All other endpoints (and chats with non-thinking models, or chats where the
-client already set 'think' explicitly) are forwarded byte-for-byte.
+  /api/tags   — merges model lists from both backends
+  /api/show   — routes to whichever backend owns the model
+  /api/chat   — routes to the owning backend; applies adaptive thinking
+                classification only for big-GPU models
+
+Thinking classification: for /api/chat to a thinking-capable model on
+ollama-big, calls a tiny classifier on ollama-small to decide whether the
+user's last message needs deliberation. Sets body['think'] accordingly.
+Manual overrides via '/think' or '/no_think' as the first token of the user
+message.
+
+All other endpoints fall through to ollama-big (management operations).
 """
 
 from __future__ import annotations
@@ -18,16 +25,19 @@ import logging
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-UPSTREAM_URL     = os.environ.get("UPSTREAM_URL",     "http://ollama-big:11434")
-CLASSIFIER_URL   = os.environ.get("CLASSIFIER_URL",   "http://ollama-small:11434")
-CLASSIFIER_MODEL = os.environ.get("CLASSIFIER_MODEL", "granite4.1:3b")
+UPSTREAM_URL       = os.environ.get("UPSTREAM_URL",       "http://ollama-big:11434")
+SMALL_UPSTREAM_URL = os.environ.get("SMALL_UPSTREAM_URL", "http://ollama-small:11434")
+CLASSIFIER_URL     = os.environ.get("CLASSIFIER_URL",     "http://ollama-small:11434")
+CLASSIFIER_MODEL   = os.environ.get("CLASSIFIER_MODEL",   "granite4.1:3b")
 CLASSIFIER_TIMEOUT_S = float(os.environ.get("CLASSIFIER_TIMEOUT_S", "8"))
+
 # Injected into the system message whenever thinking is enabled.
 # Empirically halves thinking token count without truncating the answer.
 CONCISE_THINKING_INSTRUCTION = (
@@ -45,8 +55,12 @@ ROUTER_DEBUG_DECISIONS = os.environ.get("ROUTER_DEBUG_DECISIONS", "0").lower() i
 EXCLUDE_MODELS = set(filter(None, (os.environ.get("EXCLUDE_MODELS") or "").split(",")))
 INCLUDE_MODELS = set(filter(None, (os.environ.get("INCLUDE_MODELS") or "").split(",")))
 
-# Cache of model_name -> bool (is thinking-capable). Populated lazily from /api/show.
+# model_name -> bool (is thinking-capable). Populated lazily from /api/show.
 _thinking_cache: dict[str, bool] = {}
+
+# model_name -> backend URL. Populated from /api/tags on both backends at startup
+# and refreshed on cache miss (handles models pulled after startup).
+_model_backend: dict[str, str] = {}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [think-router] %(message)s")
 log = logging.getLogger("think-router")
@@ -62,7 +76,44 @@ HIGH — complex reasoning, non-trivial algorithms or code, planning, architectu
 
 Answer (NO, LOW, or HIGH):"""
 
-app = FastAPI()
+
+async def _refresh_model_registry() -> None:
+    """Query /api/tags on both backends and rebuild the model→backend map."""
+    updated: dict[str, str] = {}
+    for backend_url in (UPSTREAM_URL, SMALL_UPSTREAM_URL):
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{backend_url}/api/tags")
+                r.raise_for_status()
+                for m in r.json().get("models") or []:
+                    name = m.get("name")
+                    if name:
+                        updated[name] = backend_url
+        except Exception as e:
+            log.warning("model registry refresh failed for %s: %s", backend_url, e)
+    if updated:
+        _model_backend.clear()
+        _model_backend.update(updated)
+        big = sum(1 for v in updated.values() if v == UPSTREAM_URL)
+        small = sum(1 for v in updated.values() if v == SMALL_UPSTREAM_URL)
+        log.info("model registry: %d total (%d big, %d small)", len(updated), big, small)
+
+
+async def _backend_for_model(model: str) -> str:
+    """Return the backend URL that owns this model. Refreshes once on cache miss."""
+    if model in _model_backend:
+        return _model_backend[model]
+    await _refresh_model_registry()
+    return _model_backend.get(model, UPSTREAM_URL)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await _refresh_model_registry()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 def _last_user_message(messages: list[dict]) -> str:
@@ -71,11 +122,9 @@ def _last_user_message(messages: list[dict]) -> str:
             content = m.get("content")
             if isinstance(content, str):
                 return content
-            # OpenAI-style list-of-parts content
             if isinstance(content, list):
                 return " ".join(p.get("text", "") for p in content if isinstance(p, dict))
     return ""
-
 
 
 def _override_from_prefix(text: str) -> Optional[bool]:
@@ -98,7 +147,6 @@ def _apply_thinking_controls(body: dict) -> dict:
 
 
 def _trace_id_from_request(request: Request) -> str:
-    """Use an inbound request id if present, otherwise generate a short trace id."""
     inbound = request.headers.get("x-request-id") or request.headers.get("x-correlation-id")
     return inbound.strip() if inbound and inbound.strip() else uuid.uuid4().hex[:12]
 
@@ -111,7 +159,6 @@ def _decision_log(
     body: dict,
     client_supplied_think: bool,
 ) -> None:
-    """Emit one structured decision line per /api/chat request when debug is enabled."""
     if not ROUTER_DEBUG_DECISIONS:
         return
     log.info(
@@ -156,7 +203,7 @@ async def _classify(prompt: str) -> Optional[str]:
 
 
 async def _is_thinking_capable(model: str) -> bool:
-    """Look up whether the upstream model has 'thinking' in its capabilities. Cached."""
+    """Look up whether a big-GPU model has 'thinking' in its capabilities. Cached."""
     if model in EXCLUDE_MODELS:
         return False
     if model in INCLUDE_MODELS:
@@ -171,7 +218,7 @@ async def _is_thinking_capable(model: str) -> bool:
             is_thinking = "thinking" in caps
     except Exception as e:
         log.warning("capability lookup failed for %s: %s", model, e)
-        is_thinking = False  # safe default: don't classify if we can't tell
+        is_thinking = False
     _thinking_cache[model] = is_thinking
     log.info("discovered model=%s thinking_capable=%s (cached)", model, is_thinking)
     return is_thinking
@@ -182,32 +229,17 @@ async def _maybe_set_think(body: dict, trace_id: str) -> dict:
     model = body.get("model", "")
     client_supplied_think = "think" in body
     if not model:
-        _decision_log(
-            trace_id,
-            model=model,
-            reason="missing-model",
-            body=body,
-            client_supplied_think=client_supplied_think,
-        )
+        _decision_log(trace_id, model=model, reason="missing-model", body=body,
+                      client_supplied_think=client_supplied_think)
         return body
     if not await _is_thinking_capable(model):
-        _decision_log(
-            trace_id,
-            model=model,
-            reason="not-thinking-capable",
-            body=body,
-            client_supplied_think=client_supplied_think,
-        )
+        _decision_log(trace_id, model=model, reason="not-thinking-capable", body=body,
+                      client_supplied_think=client_supplied_think)
         return body
     if client_supplied_think:
         log.info("model=%s think=%s (client-supplied; passthrough)", model, body["think"])
-        _decision_log(
-            trace_id,
-            model=model,
-            reason="client-supplied",
-            body=body,
-            client_supplied_think=client_supplied_think,
-        )
+        _decision_log(trace_id, model=model, reason="client-supplied", body=body,
+                      client_supplied_think=client_supplied_think)
         return body
 
     last = _last_user_message(body.get("messages", []))
@@ -217,13 +249,8 @@ async def _maybe_set_think(body: dict, trace_id: str) -> dict:
         if override:
             _apply_thinking_controls(body)
         log.info("model=%s think=%s (override)", model, override)
-        _decision_log(
-            trace_id,
-            model=model,
-            reason="override",
-            body=body,
-            client_supplied_think=client_supplied_think,
-        )
+        _decision_log(trace_id, model=model, reason="override", body=body,
+                      client_supplied_think=client_supplied_think)
         return body
 
     # RAG-augmented message: document synthesis almost always benefits from full deliberation.
@@ -231,13 +258,8 @@ async def _maybe_set_think(body: dict, trace_id: str) -> dict:
         body["think"] = True
         _apply_thinking_controls(body)
         log.info("model=%s think=True (rag-detected)", model)
-        _decision_log(
-            trace_id,
-            model=model,
-            reason="rag-detected",
-            body=body,
-            client_supplied_think=client_supplied_think,
-        )
+        _decision_log(trace_id, model=model, reason="rag-detected", body=body,
+                      client_supplied_think=client_supplied_think)
         return body
 
     tier = await _classify(last)
@@ -259,18 +281,12 @@ async def _maybe_set_think(body: dict, trace_id: str) -> dict:
         _apply_thinking_controls(body)
         log.info("model=%s think=True (classified HIGH)", model)
         reason = "classified HIGH"
-    _decision_log(
-        trace_id,
-        model=model,
-        reason=reason,
-        body=body,
-        client_supplied_think=client_supplied_think,
-    )
+    _decision_log(trace_id, model=model, reason=reason, body=body,
+                  client_supplied_think=client_supplied_think)
     return body
 
 
 def _is_streaming(body: dict) -> bool:
-    # Ollama defaults to streaming when 'stream' is unset.
     return body.get("stream", True)
 
 
@@ -279,9 +295,11 @@ async def _forward(
     body_bytes: bytes,
     body_obj: Optional[dict],
     trace_id: str,
+    *,
+    target_base: str = UPSTREAM_URL,
 ) -> Response:
-    """Forward the request to UPSTREAM_URL; stream back if upstream streams."""
-    url = f"{UPSTREAM_URL}{request.url.path}"
+    """Forward the request to target_base; stream back if upstream streams."""
+    url = f"{target_base}{request.url.path}"
     params = dict(request.query_params)
     headers = {k: v for k, v in request.headers.items()
                if k.lower() not in ("host", "content-length")}
@@ -299,13 +317,9 @@ async def _forward(
     headers_ms = (time.perf_counter() - started) * 1000
     if ROUTER_DEBUG_DECISIONS:
         log.info(
-            "forward_headers trace_id=%s method=%s path=%s status=%s stream=%s elapsed_ms=%.1f",
-            trace_id,
-            request.method,
-            request.url.path,
-            upstream.status_code,
-            streaming,
-            headers_ms,
+            "forward_headers trace_id=%s method=%s path=%s target=%s status=%s stream=%s elapsed_ms=%.1f",
+            trace_id, request.method, request.url.path, target_base,
+            upstream.status_code, streaming, headers_ms,
         )
 
     if not streaming:
@@ -315,11 +329,7 @@ async def _forward(
             if ROUTER_DEBUG_DECISIONS:
                 log.info(
                     "forward_complete trace_id=%s method=%s path=%s status=%s stream=False elapsed_ms=%.1f",
-                    trace_id,
-                    request.method,
-                    request.url.path,
-                    upstream.status_code,
-                    total_ms,
+                    trace_id, request.method, request.url.path, upstream.status_code, total_ms,
                 )
             return Response(
                 content=content,
@@ -339,11 +349,7 @@ async def _forward(
             if ROUTER_DEBUG_DECISIONS:
                 log.info(
                     "forward_complete trace_id=%s method=%s path=%s status=%s stream=True elapsed_ms=%.1f",
-                    trace_id,
-                    request.method,
-                    request.url.path,
-                    upstream.status_code,
-                    total_ms,
+                    trace_id, request.method, request.url.path, upstream.status_code, total_ms,
                 )
             await upstream.aclose()
             await client.aclose()
@@ -359,13 +365,20 @@ async def _forward(
 async def health():
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
-            up = await client.get(f"{UPSTREAM_URL}/api/version")
-            cl = await client.get(f"{CLASSIFIER_URL}/api/version")
+            up  = await client.get(f"{UPSTREAM_URL}/api/version")
+            sm  = await client.get(f"{SMALL_UPSTREAM_URL}/api/version")
+            cl  = await client.get(f"{CLASSIFIER_URL}/api/version")
+        registry_view = {
+            k: ("big" if v == UPSTREAM_URL else "small")
+            for k, v in _model_backend.items()
+        }
         return {
-            "ok": up.status_code == 200 and cl.status_code == 200,
-            "upstream": up.status_code,
+            "ok": up.status_code == 200 and sm.status_code == 200 and cl.status_code == 200,
+            "upstream_big": up.status_code,
+            "upstream_small": sm.status_code,
             "classifier": cl.status_code,
-            "discovered": _thinking_cache,
+            "model_registry": registry_view,
+            "thinking_cache": _thinking_cache,
             "exclude_override": sorted(EXCLUDE_MODELS),
             "include_override": sorted(INCLUDE_MODELS),
             "router_debug_decisions": ROUTER_DEBUG_DECISIONS,
@@ -374,20 +387,55 @@ async def health():
         return JSONResponse(status_code=503, content={"ok": False, "error": str(e)})
 
 
+@app.get("/api/tags")
+async def tags():
+    """Merge model lists from both backends into a single /api/tags response."""
+    all_models = []
+    for backend_url in (UPSTREAM_URL, SMALL_UPSTREAM_URL):
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{backend_url}/api/tags")
+                r.raise_for_status()
+                all_models.extend(r.json().get("models") or [])
+        except Exception as e:
+            log.warning("/api/tags fetch failed for %s: %s", backend_url, e)
+    return JSONResponse({"models": all_models})
+
+
+@app.post("/api/show")
+async def show(request: Request):
+    """Route /api/show to whichever backend owns the requested model."""
+    trace_id = _trace_id_from_request(request)
+    raw = await request.body()
+    try:
+        model = json.loads(raw).get("model", "")
+    except Exception:
+        model = ""
+    target = await _backend_for_model(model) if model else UPSTREAM_URL
+    return await _forward(request, raw, None, trace_id, target_base=target)
+
+
 @app.post("/api/chat")
 async def chat(request: Request):
+    """Route to the owning backend; apply thinking classification for big-GPU models."""
     trace_id = _trace_id_from_request(request)
     raw = await request.body()
     try:
         body = json.loads(raw)
     except Exception:
         return await _forward(request, raw, None, trace_id)
-    body = await _maybe_set_think(body, trace_id)
+
+    model = body.get("model", "")
+    target = await _backend_for_model(model) if model else UPSTREAM_URL
+
+    if target == UPSTREAM_URL:
+        body = await _maybe_set_think(body, trace_id)
+
     new_raw = json.dumps(body).encode("utf-8")
-    return await _forward(request, new_raw, body, trace_id)
+    return await _forward(request, new_raw, body, trace_id, target_base=target)
 
 
-# Catch-all transparent proxy for all other paths and methods.
+# Catch-all transparent proxy for all other paths and methods (management ops → big GPU).
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"])
 async def passthrough(path: str, request: Request):
     trace_id = _trace_id_from_request(request)
