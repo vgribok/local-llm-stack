@@ -1,0 +1,30 @@
+# macOS overlay: bare-metal Ollama on host (Apple Silicon)
+# Usage: docker compose -f docker-compose.yml -f docker-compose.mac.yml up -d
+#
+# Prerequisites:
+#   - Ollama running on host at localhost:11434
+#   - Models pulled: granite4.1:3b, nomic-embed-text, and your chat model(s)
+
+services:
+
+  think-router:
+    ports:
+      # Use 11435 to avoid conflict with bare-metal Ollama on 11434
+      - "11435:11434"
+    environment:
+      # All URLs point to the single host Ollama instance
+      - UPSTREAM_URL=http://host.docker.internal:11434
+      - SMALL_UPSTREAM_URL=http://host.docker.internal:11434
+      - CLASSIFIER_URL=http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  open-webui:
+    environment:
+      # RAG embeddings go directly to host Ollama
+      - RAG_OLLAMA_BASE_URL=http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  ai-net:

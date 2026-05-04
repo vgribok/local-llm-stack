@@ -390,16 +390,21 @@ async def health():
 @app.get("/api/tags")
 async def tags():
     """Merge model lists from both backends into a single /api/tags response."""
-    all_models = []
+    seen_names: set[str] = set()
+    unique_models: list[dict] = []
     for backend_url in (UPSTREAM_URL, SMALL_UPSTREAM_URL):
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 r = await client.get(f"{backend_url}/api/tags")
                 r.raise_for_status()
-                all_models.extend(r.json().get("models") or [])
+                for m in r.json().get("models") or []:
+                    name = m.get("name")
+                    if name and name not in seen_names:
+                        seen_names.add(name)
+                        unique_models.append(m)
         except Exception as e:
             log.warning("/api/tags fetch failed for %s: %s", backend_url, e)
-    return JSONResponse({"models": all_models})
+    return JSONResponse({"models": unique_models})
 
 
 @app.post("/api/show")

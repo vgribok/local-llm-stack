@@ -1,56 +1,81 @@
 <#
 .SYNOPSIS
-    Wrapper around the two-Ollama-backend setup (ollama-big / ollama-small).
+    Cross-platform wrapper for the ai-stack Ollama setup.
 
 .DESCRIPTION
-    Routes Ollama operations to the correct Docker container based on model size.
-    Big models (> ThresholdGB on disk) -> ollama-big (3090 Ti, 24 GB).
-    Small / embedding models -> ollama-small (5060 Ti, 16 GB).
+    On Windows (PC): Routes Ollama operations to Docker containers (ollama-big / ollama-small)
+    based on model size. Big models (> ThresholdGB) -> ollama-big, small/embedding -> ollama-small.
 
-    For commands that operate on an existing model (rm, stop, show, run),
-    auto-detects which backend has it. Override with -Backend big|small.
+    On macOS: Ollama runs on bare metal; all operations use the native `ollama` CLI directly.
+    The Docker stack (think-router, open-webui) connects to host Ollama via host.docker.internal.
 
 .EXAMPLE
-    .\ollama.ps1 pull qwen3:32b           # auto -> big
-    .\ollama.ps1 pull granite4.1:1b       # auto -> small
-    .\ollama.ps1 pull nomic-embed-text    # name pattern -> small
-    .\ollama.ps1 pull qwen3:14b -Backend small   # force override
-    .\ollama.ps1 list                     # list models on both backends
-    .\ollama.ps1 ps                       # show loaded models on both GPUs
-    .\ollama.ps1 rm granite4.1:3b         # delete model from disk (auto-finds backend)
-    .\ollama.ps1 stop qwen3.6:27b         # unload from VRAM only; weights stay on disk
-    .\ollama.ps1 run granite4.1:3b        # interactive chat
-    .\ollama.ps1 size qwen3:32b           # check registry size without pulling
-    .\ollama.ps1 start                    # docker compose up -d, wait healthy, open OWUI
-    .\ollama.ps1 up                       # synonym for 'start'
+    ./ollama.ps1 pull qwen3:32b           # PC: auto -> big; Mac: direct pull
+    ./ollama.ps1 pull granite4.1:1b       # PC: auto -> small; Mac: direct pull
+    ./ollama.ps1 list                     # list models (both backends on PC, single on Mac)
+    ./ollama.ps1 ps                       # show loaded models
+    ./ollama.ps1 rm granite4.1:3b         # delete model from disk
+    ./ollama.ps1 stop qwen3.6:27b         # unload from VRAM
+    ./ollama.ps1 run granite4.1:3b        # interactive chat
+    ./ollama.ps1 size qwen3:32b           # check registry size without pulling
+    ./ollama.ps1 start                    # docker compose up, wait healthy, open OWUI
+    ./ollama.ps1 up                       # synonym for 'start'
 #>
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true, Position=0)]
+    [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet("pull", "list", "ps", "rm", "stop", "show", "run", "size", "start", "up", "help")]
     [string]$Command,
 
-    [Parameter(Position=1)]
+    [Parameter(Position = 1)]
     [string]$Model,
 
     [ValidateSet("big", "small", "auto")]
     [string]$Backend = "auto",
 
-    # Models with on-disk size > this go to big; otherwise small.
-    # 8 GB covers ~13B Q4 weights; 27B+ goes to big.
+    # Models with on-disk size > this go to big; otherwise small. (PC only)
     [double]$ThresholdGB = 8
 )
 
 $ErrorActionPreference = "Stop"
 
-$Backends = @{
-    big   = @{ container = "ai-stack-ollama-big-1";   url = "http://localhost:3003" }
-    small = @{ container = "ai-stack-ollama-small-1"; url = "http://localhost:3004" }
+#region Platform Detection & Configuration
+
+$Platform = if ($IsMacOS) { "mac" } elseif ($IsWindows -or $env:OS -eq "Windows_NT") { "pc" } else { "pc" }
+
+# Platform-specific configuration
+$PlatformConfig = @{
+    mac = @{
+        ComposeFiles    = @("docker-compose.yml", "docker-compose.mac.yml")
+        WebUiUrl        = "http://localhost:3001"
+        ThinkRouterUrl  = "http://localhost:11435"
+        # Single backend - all models in one place
+        Backends        = @{
+            default = @{ url = "http://localhost:11434" }
+        }
+        # On Mac, Ollama runs on bare metal
+        UsesDocker      = $false
+    }
+    pc  = @{
+        ComposeFiles    = @("docker-compose.yml", "docker-compose.pc.yml")
+        WebUiUrl        = "http://localhost:3001"
+        ThinkRouterUrl  = "http://localhost:11434"
+        # Dual backends - big GPU and small GPU
+        Backends        = @{
+            big   = @{ container = "ai-stack-ollama-big-1"; url = "http://localhost:3003" }
+            small = @{ container = "ai-stack-ollama-small-1"; url = "http://localhost:3004" }
+        }
+        # On PC, Ollama runs in Docker containers
+        UsesDocker      = $true
+    }
 }
 
-$ComposeFile = Join-Path $PSScriptRoot "docker-compose.yml"
-$WebUiUrl    = "http://localhost:3001"
+$Config = $PlatformConfig[$Platform]
+
+#endregion
+
+#region Helper Functions
 
 function Normalize-Name([string]$n) {
     if ($n -notlike "*:*") { return "${n}:latest" }
@@ -68,15 +93,86 @@ function Get-ModelSizeGB([string]$name) {
         $r = Invoke-RestMethod -Uri "https://registry.ollama.ai/v2/$modelName/manifests/$tag" -Headers $hdr -TimeoutSec 10
         $bytes = ($r.layers | Measure-Object -Property size -Sum).Sum
         return [math]::Round($bytes / 1GB, 2)
-    } catch {
+    }
+    catch {
         return $null
     }
 }
 
+function Invoke-Ollama {
+    <#
+    .SYNOPSIS
+        Execute an Ollama command, routing to the correct backend based on platform.
+    .PARAMETER BackendKey
+        On PC: 'big' or 'small'. On Mac: ignored (uses native CLI).
+    .PARAMETER Arguments
+        Arguments to pass to ollama.
+    .PARAMETER Interactive
+        If true, uses docker exec -it for interactive sessions (PC only).
+    #>
+    param(
+        [string]$BackendKey = "default",
+        [string[]]$Arguments,
+        [switch]$Interactive
+    )
+
+    if ($Config.UsesDocker) {
+        # PC: route to Docker container
+        $container = $Config.Backends[$BackendKey].container
+        $execArgs = if ($Interactive) { @("-it") } else { @() }
+        Write-Host "==> docker exec $execArgs $container ollama $($Arguments -join ' ')" -ForegroundColor DarkGray
+        & docker exec @execArgs $container ollama @Arguments
+    }
+    else {
+        # Mac: direct CLI
+        Write-Host "==> ollama $($Arguments -join ' ')" -ForegroundColor DarkGray
+        & ollama @Arguments
+    }
+}
+
+function Get-OllamaModels([string]$BackendKey) {
+    <#
+    .SYNOPSIS
+        Get list of models from a backend via API.
+    #>
+    $url = $Config.Backends[$BackendKey].url
+    try {
+        $r = Invoke-RestMethod -Uri "$url/api/tags" -TimeoutSec 5
+        return $r.models
+    }
+    catch {
+        return @()
+    }
+}
+
+function Find-ModelBackend([string]$name) {
+    <#
+    .SYNOPSIS
+        Find which backend has a model. Returns backend key or $null.
+    #>
+    $needle = Normalize-Name $name
+
+    foreach ($key in $Config.Backends.Keys) {
+        $models = Get-OllamaModels $key
+        if ($models | Where-Object { $_.name -eq $needle }) {
+            return $key
+        }
+    }
+    return $null
+}
+
 function Resolve-PullBackend([string]$name) {
+    <#
+    .SYNOPSIS
+        Determine which backend to pull a model to. PC only - uses size heuristics.
+    #>
+    if (-not $Config.UsesDocker) {
+        return "default"
+    }
+
     if ($Backend -ne "auto") { return $Backend }
 
-    # Embedding / reranker models always go to small.
+    # Embedding / reranker models always go to small
     if ($name -match "(?i)embed|bge|e5-|gte-|rerank|jina") {
         Write-Host "[$name] embedding/reranker pattern -> small"
         return "small"
@@ -93,31 +189,55 @@ function Resolve-PullBackend([string]$name) {
     return $target
 }
 
-function Find-ExistingBackend([string]$name) {
-    $needle = Normalize-Name $name
-    foreach ($b in @("big", "small")) {
-        try {
-            $r = Invoke-RestMethod -Uri "$($Backends[$b].url)/api/tags" -TimeoutSec 5
-            if ($r.models | Where-Object { $_.name -eq $needle }) {
-                return $b
-            }
-        } catch {}
-    }
-    return $null
-}
-
 function Resolve-ExistingBackend([string]$name) {
+    <#
+    .SYNOPSIS
+        Find which backend has an existing model, or throw if not found.
+    #>
+    if (-not $Config.UsesDocker) {
+        return "default"
+    }
+
     if ($Backend -ne "auto") { return $Backend }
-    $b = Find-ExistingBackend $name
-    if (-not $b) { throw "Model '$name' not found on either backend. Pull it first or specify -Backend." }
-    return $b
+
+    $found = Find-ModelBackend $name
+    if (-not $found) {
+        throw "Model '$name' not found on either backend. Pull it first or specify -Backend."
+    }
+    return $found
 }
 
-function Invoke-OnBackend($b, [string[]]$cmdArgs) {
-    $c = $Backends[$b].container
-    Write-Host "==> docker exec $c ollama $($cmdArgs -join ' ')" -ForegroundColor DarkGray
-    & docker exec $c ollama @cmdArgs
+function Start-Stack {
+    <#
+    .SYNOPSIS
+        Start the Docker Compose stack with platform-appropriate compose files.
+    #>
+    $composeArgs = @()
+    foreach ($f in $Config.ComposeFiles) {
+        $composeArgs += @("-f", (Join-Path $PSScriptRoot $f))
+    }
+
+    Write-Host "==> docker compose $($composeArgs -join ' ') up -d --build --remove-orphans --wait" -ForegroundColor DarkGray
+    & docker compose @composeArgs up -d --build --remove-orphans --wait
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "docker compose up failed (exit $LASTEXITCODE). Stack is not ready; not opening browser."
+    }
+
+    Write-Host "All containers healthy. Opening $($Config.WebUiUrl) ..." -ForegroundColor Green
+
+    # Cross-platform browser open
+    if ($IsMacOS) {
+        & open $Config.WebUiUrl
+    }
+    else {
+        Start-Process $Config.WebUiUrl
+    }
 }
+
+#endregion
+
+#region Command Handlers
 
 switch ($Command) {
 
@@ -126,77 +246,95 @@ switch ($Command) {
     }
 
     "pull" {
-        if (-not $Model) { throw "Model name required: .\ollama.ps1 pull <model>" }
+        if (-not $Model) { throw "Model name required: ./ollama.ps1 pull <model>" }
         $target = Resolve-PullBackend $Model
-        Invoke-OnBackend $target @("pull", $Model)
+        Invoke-Ollama -BackendKey $target -Arguments @("pull", $Model)
     }
 
     "list" {
-        foreach ($b in @("big", "small")) {
-            Write-Host "=== $b ($($Backends[$b].container)) ===" -ForegroundColor Cyan
-            Invoke-OnBackend $b @("list")
-            Write-Host ""
+        if ($Config.UsesDocker) {
+            # PC: show both backends
+            foreach ($key in @("big", "small")) {
+                Write-Host "=== $key ($($Config.Backends[$key].container)) ===" -ForegroundColor Cyan
+                Invoke-Ollama -BackendKey $key -Arguments @("list")
+                Write-Host ""
+            }
+        }
+        else {
+            # Mac: single backend
+            Invoke-Ollama -Arguments @("list")
         }
     }
 
     "ps" {
-        foreach ($b in @("big", "small")) {
-            Write-Host "=== $b loaded ===" -ForegroundColor Cyan
-            Invoke-OnBackend $b @("ps")
-            Write-Host ""
+        if ($Config.UsesDocker) {
+            # PC: show both backends
+            foreach ($key in @("big", "small")) {
+                Write-Host "=== $key loaded ===" -ForegroundColor Cyan
+                Invoke-Ollama -BackendKey $key -Arguments @("ps")
+                Write-Host ""
+            }
+        }
+        else {
+            # Mac: single backend
+            Invoke-Ollama -Arguments @("ps")
         }
     }
 
     "rm" {
-        if (-not $Model) { throw "Model name required: .\ollama.ps1 rm <model>" }
+        if (-not $Model) { throw "Model name required: ./ollama.ps1 rm <model>" }
         $target = Resolve-ExistingBackend $Model
-        Invoke-OnBackend $target @("rm", $Model)
+        Invoke-Ollama -BackendKey $target -Arguments @("rm", $Model)
     }
 
     "stop" {
-        if (-not $Model) { throw "Model name required: .\ollama.ps1 stop <model>" }
+        if (-not $Model) { throw "Model name required: ./ollama.ps1 stop <model>" }
         $target = Resolve-ExistingBackend $Model
-        Invoke-OnBackend $target @("stop", $Model)
+        Invoke-Ollama -BackendKey $target -Arguments @("stop", $Model)
     }
 
     "show" {
-        if (-not $Model) { throw "Model name required: .\ollama.ps1 show <model>" }
+        if (-not $Model) { throw "Model name required: ./ollama.ps1 show <model>" }
         $target = Resolve-ExistingBackend $Model
-        Invoke-OnBackend $target @("show", $Model)
+        Invoke-Ollama -BackendKey $target -Arguments @("show", $Model)
     }
 
     "run" {
-        if (-not $Model) { throw "Model name required: .\ollama.ps1 run <model>" }
-        $target = Find-ExistingBackend $Model
-        if (-not $target) {
-            # Not pulled yet - pull first into the right backend, then run.
-            $target = Resolve-PullBackend $Model
-            Write-Host "Model not found on either backend. Pulling into '$target'..." -ForegroundColor Yellow
-            Invoke-OnBackend $target @("pull", $Model)
+        if (-not $Model) { throw "Model name required: ./ollama.ps1 run <model>" }
+
+        if ($Config.UsesDocker) {
+            # PC: find or pull, then run interactively
+            $target = Find-ModelBackend $Model
+            if (-not $target) {
+                $target = Resolve-PullBackend $Model
+                Write-Host "Model not found on either backend. Pulling into '$target'..." -ForegroundColor Yellow
+                Invoke-Ollama -BackendKey $target -Arguments @("pull", $Model)
+            }
+            Invoke-Ollama -BackendKey $target -Arguments @("run", $Model) -Interactive
         }
-        $c = $Backends[$target].container
-        Write-Host "==> docker exec -it $c ollama run $Model" -ForegroundColor DarkGray
-        & docker exec -it $c ollama run $Model
+        else {
+            # Mac: direct run (ollama will pull if needed)
+            Invoke-Ollama -Arguments @("run", $Model) -Interactive
+        }
     }
 
     "size" {
-        if (-not $Model) { throw "Model name required: .\ollama.ps1 size <model>" }
+        if (-not $Model) { throw "Model name required: ./ollama.ps1 size <model>" }
         $sizeGB = Get-ModelSizeGB $Model
         if ($null -eq $sizeGB) {
             Write-Warning "Could not look up size of '$Model'."
-        } else {
-            Write-Host "$Model -> $sizeGB GB on disk (threshold: $ThresholdGB GB)"
-            Write-Host "Auto-route would pick: $(if ($sizeGB -gt $ThresholdGB) { 'big' } else { 'small' })"
+        }
+        else {
+            Write-Host "$Model -> $sizeGB GB on disk"
+            if ($Config.UsesDocker) {
+                Write-Host "Auto-route would pick: $(if ($sizeGB -gt $ThresholdGB) { 'big' } else { 'small' }) (threshold: $ThresholdGB GB)"
+            }
         }
     }
 
     { $_ -in "start", "up" } {
-        Write-Host "==> docker compose -f $ComposeFile up -d --build --remove-orphans --wait" -ForegroundColor DarkGray
-        & docker compose -f $ComposeFile up -d --build --remove-orphans --wait
-        if ($LASTEXITCODE -ne 0) {
-            throw "docker compose up failed (exit $LASTEXITCODE). Stack is not ready; not opening browser."
-        }
-        Write-Host "All containers healthy. Opening $WebUiUrl ..." -ForegroundColor Green
-        Start-Process $WebUiUrl
+        Start-Stack
     }
 }
+
+#endregion
