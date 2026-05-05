@@ -103,20 +103,30 @@ $pcDualConfig = @{
 }
 
 # PC config: dual GPU wins, then bare-metal Ollama (any vendor), then single NVIDIA GPU
-$configMode = if     ($GpuCount -ge 2)  { "dual" }
-              elseif ($OllamaRunning)    { "bare-metal" }
-              elseif ($GpuCount -eq 1)  { "single" }
-              else                       { "error" }
+$pcConfig = $null
+if ($Platform -eq "pc") {
+    $configMode = if     ($GpuCount -ge 2)  { "dual" }
+                  elseif ($OllamaRunning)    { "bare-metal" }
+                  elseif ($GpuCount -eq 1)  { "single" }
+                  else                       { "error" }
 
-if ($configMode -eq "error") {
-    Write-Error "No NVIDIA GPU detected and Ollama is not running on localhost:11434. Install NVIDIA drivers or start Ollama, then retry."
-    exit 1
-}
+    if ($configMode -eq "error") {
+        Write-Error "No NVIDIA GPU detected and Ollama is not running on localhost:11434. Install NVIDIA drivers or start Ollama, then retry."
+        exit 1
+    }
 
-$pcConfig = switch ($configMode) {
-    "dual"       { $pcDualConfig }
-    "bare-metal" { $bareMetalConfig }
-    "single"     { $pcSingleConfig }
+    $pcConfig = switch ($configMode) {
+        "dual"       { $pcDualConfig }
+        "bare-metal" { $bareMetalConfig }
+        "single"     { $pcSingleConfig }
+    }
+
+    $configLabel = switch ($configMode) {
+        "dual"       { "$GpuCount GPUs detected -> dual-GPU config" }
+        "bare-metal" { "Ollama on localhost:11434 -> bare-metal config (think-router on :11435)" }
+        "single"     { "1 GPU detected, no bare-metal Ollama -> single-GPU config" }
+    }
+    Write-Host $configLabel -ForegroundColor DarkGray
 }
 
 $PlatformConfig = @{
@@ -125,15 +135,6 @@ $PlatformConfig = @{
 }
 
 $Config = $PlatformConfig[$Platform]
-
-if ($Platform -eq "pc") {
-    $configLabel = switch ($configMode) {
-        "dual"       { "$GpuCount GPUs detected -> dual-GPU config" }
-        "bare-metal" { "Ollama on localhost:11434 -> bare-metal config (think-router on :11435)" }
-        "single"     { "1 GPU detected, no bare-metal Ollama -> single-GPU config" }
-    }
-    Write-Host $configLabel -ForegroundColor DarkGray
-}
 
 #endregion
 
