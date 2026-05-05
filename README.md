@@ -1,8 +1,16 @@
 # ai-stack
 
-Local agentic AI: Open WebUI + Cline (VS Code) + adaptive thinking router + Tavily web search.
+Simplifies local agentic AI distribution: Open WebUI + adaptive thinking router + Tavily web search.<br/><br/>
+Runs everything* on Docker allowing for easy configuration changes and deployment. (On MacOS Ollama runs on bare-metal, not on Docker.)
 
 **Cross-platform:** Windows (dual-GPU NVIDIA) and macOS (Apple Silicon with bare-metal Ollama).
+
+This solution is suitable for any front-end using local Ollama back-end, like Cline extension
+of the VsCode, but is pre-integrated with bundled Open WebUI for search,
+thinking control, and for user input augmentation out of the box.<br/><br/> 
+For the dual back-end configuration on dual-RTX PCs, the system exposes unified
+Ollama backend at http://localhost:11434 which runs smaller models on a
+smaller VRAM RTX card, while larger models run on a larger one.
 
 ## What it does
 
@@ -10,7 +18,7 @@ A self-hosted ChatGPT-style UI with web-search-grounded agents. A unified Ollama
 
 ## Stack
 
-### Windows (PC) — Dual GPU
+### Windows (PC) — Two Ollama backends for Dual GPU PCs
 
 | Service | Host port | GPU | Role |
 |---|---|---|---|
