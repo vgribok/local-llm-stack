@@ -1,20 +1,34 @@
-# ai-stack
+# Local AI Stack
 
 Simplifies local agentic AI distribution: Open WebUI + adaptive thinking router + Tavily web search.<br/><br/>
 Runs everything* on Docker allowing for easy configuration changes and deployment. (On macOS Ollama runs on bare-metal, not on Docker.)
 
 **Cross-platform:** Windows (NVIDIA, single- or dual-GPU; or any GPU with bare-metal Ollama) and macOS (Apple Silicon).
 
-This solution is suitable for any front-end using local Ollama back-end, like Cline extension
-of the VsCode, but is pre-integrated with bundled Open WebUI for search,
-thinking control, and for user input augmentation out of the box.<br/><br/>
-The system exposes a unified Ollama gateway at http://localhost:11434 (Windows Docker) or http://localhost:11435 (bare-metal Ollama / macOS).
-On dual-GPU Windows PCs, large models run on the bigger VRAM card while task/embedding models run on the smaller one.
-On single-GPU or macOS, all models share one backend — the [router](./think-router/app.py) handles this transparently.
+**think-router** acts as a drop-in Ollama proxy — any client that speaks the Ollama API (Open WebUI, Cline, Continue.dev, curl) points at it instead of Ollama directly and gets adaptive thinking classification and multi-backend routing for free. The stack exposes a single Ollama-compatible endpoint at `http://localhost:11434` (Windows Docker) or `http://localhost:11435` (bare-metal / macOS).
 
 ## What it does
 
-A self-hosted ChatGPT-style UI with web-search-grounded agents. A unified Ollama gateway sits in front of the backend(s) and automatically decides whether to enable extended thinking per request, keeping reasoning latency proportional to question complexity. The same gateway endpoint serves both Open WebUI and VS Code AI coding agents (Cline, Continue.dev, etc.).
+A self-hosted ChatGPT-style UI with web-search-grounded agents, backed by a unified Ollama gateway that automatically manages extended thinking, model routing, and backend selection across one or more GPUs.
+
+## think-router
+
+think-router is an Ollama-compatible HTTP proxy ([source](./think-router/app.py)). Any client that speaks the Ollama API — Open WebUI, Cline, Continue.dev, LM Studio, or plain `curl` — connects to think-router instead of Ollama directly and gets the following automatically, with no plugin or custom integration needed:
+
+- **Adaptive thinking** — Each prompt is classified by `granite4.1:3b` to decide whether to enable extended thinking on the main model. Complex reasoning and architecture questions get full think time; factual lookups and simple code snippets skip it. Without this you must toggle thinking manually per request, or accept always-on (high latency for every message) or always-off (no deep reasoning).
+- **Unified model registry** — On dual-GPU setups, think-router merges `/api/tags` from both Ollama instances. Clients see one Ollama with all models; think-router routes each request to the backend that holds the model.
+- **Transparent passthrough** — Requests think-router doesn't need to modify are forwarded as-is. The endpoint is indistinguishable from a plain Ollama server to callers.
+
+**Thinking classifier tiers:**
+
+| Tier | Condition | Thinking |
+|---|---|---|
+| HIGH | Complex reasoning, non-trivial code, planning, architecture | on + conciseness hint |
+| LOW | Simple-to-moderate code, short explanations | off |
+| NO | Factual lookups, definitions, conversational | off |
+| RAG | `<context>` tag detected in message | on + conciseness hint |
+
+**Manual overrides** — prefix a message with `/think` or `/no_think` to bypass the classifier for that turn.
 
 ## Stack
 
@@ -45,7 +59,7 @@ Used when `nvidia-smi` reports exactly one GPU and Ollama is not already running
 | `think-router` | **11435** | Unified Ollama gateway + adaptive thinking proxy |
 | Ollama (native) | 11434 | All models (chat, task, embeddings) |
 
-> **Port 11435:** think-router uses 11435 in this configuration so it doesn't conflict with Ollama already running on 11434. Point VS Code agents and other clients to `localhost:11435`, not `localhost:11434`.
+> **Port 11435:** think-router uses 11435 in this configuration so it doesn't conflict with the pre-installed Ollama already running on 11434. Point VS Code agents and other clients to `localhost:11435`, not `localhost:11434`.
 
 Used automatically on macOS (always) and on Windows when Ollama is already running on the host before `./ollama.ps1 start` — enabling AMD, Intel Arc, or any non-NVIDIA GPU without Docker GPU pass-through.
 
@@ -156,22 +170,11 @@ The agent gets model-aware routing, adaptive thinking classification, and the co
 
 **Why bare-metal Ollama on macOS** — Apple Silicon's unified memory architecture means there's no GPU/CPU memory split to manage. Running Ollama natively gives the best performance and simplest setup. Docker containers would add overhead without benefit.
 
-**think-router is a unified gateway** — It merges `/api/tags` from all backends, routes requests to the correct backend, and applies adaptive thinking classification. On macOS and bare-metal Windows, both "big" and "small" URLs point to the same host Ollama instance — the router handles this gracefully.
+**think-router is a unified gateway** — It merges `/api/tags` from all backends, routes each request to the backend that holds the model, and applies adaptive thinking classification. On macOS and bare-metal Windows, both "big" and "small" config URLs point to the same host Ollama instance — the router handles this gracefully. The classifier (`granite4.1:3b`) adds ~50–200ms per request; thinking is only enabled when the prompt warrants it.
 
 **Port 11435 on bare-metal configurations** — think-router exposes port 11435 (not 11434) when using the bare-metal overlay, since host Ollama already occupies 11434. This applies to both macOS and bare-metal Windows.
 
 **GPU pinning on Windows uses `CUDA_VISIBLE_DEVICES`** — Docker Desktop on Windows ignores `NVIDIA_VISIBLE_DEVICES`. Filtering at the CUDA library level inside the container works. Dual-GPU uses UUIDs (not indices) because PCIe order can change; single-GPU defaults to device index 0.
-
-**think-router auto-decides thinking per request** — Classifies each user prompt with `granite4.1:3b` into three tiers:
-
-| Classifier tier | Condition | think flag |
-|---|---|---|
-| HIGH | Complex reasoning, non-trivial code, planning, architecture | `true` + conciseness instruction |
-| LOW | Simple-to-moderate code, short explanations | `false` |
-| NO | Factual lookups, definitions, conversational | `false` |
-| RAG | `<context>` tag detected in message | `true` + conciseness instruction |
-
-Manual overrides `/think` and `/no_think` as the first token of a message bypass the classifier.
 
 ## File layout
 
