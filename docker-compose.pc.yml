@@ -16,7 +16,7 @@ services:
     environment:
       # Pin to RTX 3090 Ti. Docker Desktop on Windows ignores NVIDIA_VISIBLE_DEVICES
       # filtering, so we restrict at the CUDA library level instead.
-      - CUDA_VISIBLE_DEVICES=GPU-c83aac7a-326c-d2ee-ecae-da8e6bf09cf8
+      - CUDA_VISIBLE_DEVICES=${BIG_GPU_ID}
       - OLLAMA_FLASH_ATTENTION=1
       - OLLAMA_KV_CACHE_TYPE=q4_0
       - OLLAMA_NUM_PARALLEL=1
@@ -52,7 +52,7 @@ services:
     environment:
       # Pin to RTX 5060 Ti. Docker Desktop on Windows ignores NVIDIA_VISIBLE_DEVICES
       # filtering, so we restrict at the CUDA library level instead.
-      - CUDA_VISIBLE_DEVICES=GPU-7fe8511c-b5dd-1309-e2e9-04c8b86be2fa
+      - CUDA_VISIBLE_DEVICES=${SMALL_GPU_ID}
       - OLLAMA_FLASH_ATTENTION=1
       - OLLAMA_KV_CACHE_TYPE=q8_0
       - OLLAMA_NUM_PARALLEL=4

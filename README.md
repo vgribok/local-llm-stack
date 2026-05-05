@@ -60,17 +60,21 @@ TAVILY_API_KEY=tvly-...
 # Mac with 96GB unified RAM can handle 120000+
 # Windows with 24GB VRAM: 48000 is a good default
 BIG_CONTEXT_LENGTH=48000
+
+# GPU UUIDs for Windows dual-GPU pinning (run: nvidia-smi --query-gpu=uuid,name --format=csv)
+BIG_GPU_ID=GPU-...
+SMALL_GPU_ID=GPU-...
 ```
 
 ### 2. Platform-specific setup
 
 #### Windows
 
-Update GPU UUIDs in [docker-compose.pc.yml](docker-compose.pc.yml). Find yours:
+Find your GPU UUIDs and add them to `.env`:
 ```powershell
 nvidia-smi --query-gpu=uuid,name --format=csv
 ```
-Replace the `CUDA_VISIBLE_DEVICES=GPU-...` values for `ollama-big` and `ollama-small`.
+Set `BIG_GPU_ID` to the UUID of your larger-VRAM card and `SMALL_GPU_ID` to the smaller one.
 
 #### macOS
 
