@@ -1,0 +1,58 @@
+# Windows/PC overlay: single-GPU Ollama backend (NVIDIA CUDA)
+# Usage: docker compose -f docker-compose.yml -f docker-compose.pc-single.yml up -d
+
+services:
+
+  ollama-big:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "3003:11434"
+    volumes:
+      - C:/Users/vgrib/.ollama:/root/.ollama
+    environment:
+      - CUDA_VISIBLE_DEVICES=${GPU_ID:-0}
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q4_0
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_MAX_LOADED_MODELS=3
+      - OLLAMA_MAX_QUEUE=512
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_CONTEXT_LENGTH=${CONTEXT_LENGTH:-32768}
+    runtime: nvidia
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  think-router:
+    ports:
+      - "11434:11434"
+    environment:
+      - UPSTREAM_URL=http://ollama-big:11434
+      - SMALL_UPSTREAM_URL=http://ollama-big:11434
+      - CLASSIFIER_URL=http://ollama-big:11434
+    depends_on:
+      ollama-big:
+        condition: service_healthy
+
+  open-webui:
+    environment:
+      - RAG_OLLAMA_BASE_URL=http://ollama-big:11434
+    depends_on:
+      ollama-big:
+        condition: service_healthy
+
+networks:
+  ai-net:

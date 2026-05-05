@@ -1,9 +1,13 @@
 {
     "cSpell.words": [
         "agentic",
+        "CUDA",
+        "mxfp",
         "nomic",
         "ollama",
+        "OWUI",
         "qwen",
-        "Tavily"
+        "Tavily",
+        "webui"
     ]
 }

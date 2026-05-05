@@ -1,5 +1,5 @@
 # Windows/PC overlay: dual-GPU Ollama backends (NVIDIA CUDA)
-# Usage: docker compose -f docker-compose.yml -f docker-compose.pc.yml up -d
+# Usage: docker compose -f docker-compose.yml -f docker-compose.pc-dual.yml up -d
 
 services:
 

@@ -3,16 +3,17 @@
     Cross-platform wrapper for the ai-stack Ollama setup.
 
 .DESCRIPTION
-    On Windows (PC): Routes Ollama operations to Docker containers (ollama-big / ollama-small)
-    based on model size. Big models (> ThresholdGB) -> ollama-big, small/embedding -> ollama-small.
+    On Windows (PC): Routes Ollama operations to Docker containers based on GPU count.
+    Dual-GPU: big models (> ThresholdGB) -> ollama-big, small/embedding -> ollama-small.
+    Single-GPU: all models go to one ollama-big container (auto-detected via nvidia-smi).
 
     On macOS: Ollama runs on bare metal; all operations use the native `ollama` CLI directly.
     The Docker stack (think-router, open-webui) connects to host Ollama via host.docker.internal.
 
 .EXAMPLE
     ./ollama.ps1 pull qwen3:32b           # PC: auto -> big; Mac: direct pull
-    ./ollama.ps1 pull granite4.1:1b       # PC: auto -> small; Mac: direct pull
-    ./ollama.ps1 list                     # list models (both backends on PC, single on Mac)
+    ./ollama.ps1 pull granite4.1:1b       # PC dual-GPU: auto -> small; single-GPU: -> big; Mac: direct pull
+    ./ollama.ps1 list                     # list models (all backends on PC, single on Mac)
     ./ollama.ps1 ps                       # show loaded models
     ./ollama.ps1 rm granite4.1:3b         # delete model from disk
     ./ollama.ps1 stop qwen3.6:27b         # unload from VRAM
@@ -34,7 +35,7 @@ param(
     [ValidateSet("big", "small", "auto")]
     [string]$Backend = "auto",
 
-    # Models with on-disk size > this go to big; otherwise small. (PC only)
+    # Models with on-disk size > this go to big; otherwise small. (PC dual-GPU only)
     [double]$ThresholdGB = 8
 )
 
@@ -44,34 +45,61 @@ $ErrorActionPreference = "Stop"
 
 $Platform = if ($IsMacOS) { "mac" } elseif ($IsWindows -or $env:OS -eq "Windows_NT") { "pc" } else { "pc" }
 
-# Platform-specific configuration
+# Detect number of NVIDIA GPUs (PC only; 0 if nvidia-smi unavailable)
+$GpuCount = 0
+if ($Platform -eq "pc") {
+    try {
+        $gpuLines = & nvidia-smi --query-gpu=name --format=csv,noheader 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $GpuCount = @($gpuLines | Where-Object { $_.Trim() -ne "" }).Count
+        }
+    }
+    catch { }
+}
+
+$pcSingleConfig = @{
+    ComposeFiles   = @("docker-compose.yml", "docker-compose.pc-single.yml")
+    WebUiUrl       = "http://localhost:3001"
+    ThinkRouterUrl = "http://localhost:11434"
+    Backends       = @{
+        big = @{ container = "ai-stack-ollama-big-1"; url = "http://localhost:3003" }
+    }
+    BackendOrder   = @("big")
+    UsesDocker     = $true
+}
+
+$pcDualConfig = @{
+    ComposeFiles   = @("docker-compose.yml", "docker-compose.pc-dual.yml")
+    WebUiUrl       = "http://localhost:3001"
+    ThinkRouterUrl = "http://localhost:11434"
+    Backends       = @{
+        big   = @{ container = "ai-stack-ollama-big-1"; url = "http://localhost:3003" }
+        small = @{ container = "ai-stack-ollama-small-1"; url = "http://localhost:3004" }
+    }
+    BackendOrder   = @("big", "small")
+    UsesDocker     = $true
+}
+
 $PlatformConfig = @{
     mac = @{
-        ComposeFiles    = @("docker-compose.yml", "docker-compose.mac.yml")
-        WebUiUrl        = "http://localhost:3001"
-        ThinkRouterUrl  = "http://localhost:11435"
-        # Single backend - all models in one place
-        Backends        = @{
+        ComposeFiles   = @("docker-compose.yml", "docker-compose.mac.yml")
+        WebUiUrl       = "http://localhost:3001"
+        ThinkRouterUrl = "http://localhost:11435"
+        Backends       = @{
             default = @{ url = "http://localhost:11434" }
         }
-        # On Mac, Ollama runs on bare metal
-        UsesDocker      = $false
+        BackendOrder   = @("default")
+        UsesDocker     = $false
     }
-    pc  = @{
-        ComposeFiles    = @("docker-compose.yml", "docker-compose.pc.yml")
-        WebUiUrl        = "http://localhost:3001"
-        ThinkRouterUrl  = "http://localhost:11434"
-        # Dual backends - big GPU and small GPU
-        Backends        = @{
-            big   = @{ container = "ai-stack-ollama-big-1"; url = "http://localhost:3003" }
-            small = @{ container = "ai-stack-ollama-small-1"; url = "http://localhost:3004" }
-        }
-        # On PC, Ollama runs in Docker containers
-        UsesDocker      = $true
-    }
+    pc = if ($GpuCount -eq 1) { $pcSingleConfig } else { $pcDualConfig }
 }
 
 $Config = $PlatformConfig[$Platform]
+
+if ($Platform -eq "pc") {
+    $gpuLabel = if ($GpuCount -eq 1) { "1 GPU detected -> single-GPU config" } else { "$GpuCount GPU(s) detected -> dual-GPU config" }
+    Write-Host $gpuLabel -ForegroundColor DarkGray
+}
 
 #endregion
 
@@ -170,7 +198,15 @@ function Resolve-PullBackend([string]$name) {
         return "default"
     }
 
-    if ($Backend -ne "auto") { return $Backend }
+    if ($Backend -ne "auto") {
+        if (-not $Config.Backends.ContainsKey($Backend)) {
+            throw "Backend '$Backend' is not available. Available: $($Config.Backends.Keys -join ', ')"
+        }
+        return $Backend
+    }
+
+    # Single-backend mode: all models go to the only available backend
+    if ($Config.BackendOrder.Count -eq 1) { return $Config.BackendOrder[0] }
 
     # Embedding / reranker models always go to small
     if ($name -match "(?i)embed|bge|e5-|gte-|rerank|jina") {
@@ -198,7 +234,12 @@ function Resolve-ExistingBackend([string]$name) {
         return "default"
     }
 
-    if ($Backend -ne "auto") { return $Backend }
+    if ($Backend -ne "auto") {
+        if (-not $Config.Backends.ContainsKey($Backend)) {
+            throw "Backend '$Backend' is not available. Available: $($Config.Backends.Keys -join ', ')"
+        }
+        return $Backend
+    }
 
     $found = Find-ModelBackend $name
     if (-not $found) {
@@ -253,8 +294,7 @@ switch ($Command) {
 
     "list" {
         if ($Config.UsesDocker) {
-            # PC: show both backends
-            foreach ($key in @("big", "small")) {
+            foreach ($key in $Config.BackendOrder) {
                 Write-Host "=== $key ($($Config.Backends[$key].container)) ===" -ForegroundColor Cyan
                 Invoke-Ollama -BackendKey $key -Arguments @("list")
                 Write-Host ""
@@ -268,8 +308,7 @@ switch ($Command) {
 
     "ps" {
         if ($Config.UsesDocker) {
-            # PC: show both backends
-            foreach ($key in @("big", "small")) {
+            foreach ($key in $Config.BackendOrder) {
                 Write-Host "=== $key loaded ===" -ForegroundColor Cyan
                 Invoke-Ollama -BackendKey $key -Arguments @("ps")
                 Write-Host ""
@@ -327,7 +366,11 @@ switch ($Command) {
         else {
             Write-Host "$Model -> $sizeGB GB on disk"
             if ($Config.UsesDocker) {
-                Write-Host "Auto-route would pick: $(if ($sizeGB -gt $ThresholdGB) { 'big' } else { 'small' }) (threshold: $ThresholdGB GB)"
+                if ($Config.BackendOrder.Count -gt 1) {
+                    Write-Host "Auto-route would pick: $(if ($sizeGB -gt $ThresholdGB) { 'big' } else { 'small' }) (threshold: $ThresholdGB GB)"
+                } else {
+                    Write-Host "Single-GPU mode: would go to $($Config.BackendOrder[0])"
+                }
             }
         }
     }
