@@ -3,17 +3,18 @@
     Cross-platform wrapper for the ai-stack Ollama setup.
 
 .DESCRIPTION
-    On Windows (PC): Routes Ollama operations to Docker containers based on GPU count.
-    Dual-GPU: big models (> ThresholdGB) -> ollama-big, small/embedding -> ollama-small.
-    Single-GPU: all models go to one ollama-big container (auto-detected via nvidia-smi).
+    On Windows (PC): selects a backend configuration automatically:
+      - 2+ NVIDIA GPUs               -> dual-GPU Docker containers (ollama-big / ollama-small)
+      - Ollama already on :11434      -> bare-metal overlay (any GPU vendor; think-router on :11435)
+      - 1 NVIDIA GPU, no bare-metal  -> single-GPU Docker container (ollama-big; think-router on :11434)
 
-    On macOS: Ollama runs on bare metal; all operations use the native `ollama` CLI directly.
+    On macOS: Ollama always runs on bare metal; uses the bare-metal overlay (think-router on :11435).
     The Docker stack (think-router, open-webui) connects to host Ollama via host.docker.internal.
 
 .EXAMPLE
-    ./ollama.ps1 pull qwen3:32b           # PC: auto -> big; Mac: direct pull
-    ./ollama.ps1 pull granite4.1:1b       # PC dual-GPU: auto -> small; single-GPU: -> big; Mac: direct pull
-    ./ollama.ps1 list                     # list models (all backends on PC, single on Mac)
+    ./ollama.ps1 pull qwen3:32b           # Docker PC: auto-routed by size; bare-metal/Mac: direct pull
+    ./ollama.ps1 pull granite4.1:1b       # dual-GPU Docker: -> small; single-GPU Docker: -> big; bare-metal/Mac: direct
+    ./ollama.ps1 list                     # list models (all backends)
     ./ollama.ps1 ps                       # show loaded models
     ./ollama.ps1 rm granite4.1:3b         # delete model from disk
     ./ollama.ps1 stop qwen3.6:27b         # unload from VRAM
@@ -45,7 +46,7 @@ $ErrorActionPreference = "Stop"
 
 $Platform = if ($IsMacOS) { "mac" } elseif ($IsWindows -or $env:OS -eq "Windows_NT") { "pc" } else { "pc" }
 
-# Detect number of NVIDIA GPUs (PC only; 0 if nvidia-smi unavailable)
+# Detect NVIDIA GPU count (PC only; stays 0 if nvidia-smi unavailable)
 $GpuCount = 0
 if ($Platform -eq "pc") {
     try {
@@ -55,6 +56,27 @@ if ($Platform -eq "pc") {
         }
     }
     catch { }
+}
+
+# Check for bare-metal Ollama on the host (PC only; skipped for dual-GPU for speed)
+$OllamaRunning = $false
+if ($Platform -eq "pc" -and $GpuCount -lt 2) {
+    try {
+        $null = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 2
+        $OllamaRunning = $true
+    }
+    catch { }
+}
+
+$bareMetalConfig = @{
+    ComposeFiles   = @("docker-compose.yml", "docker-compose.bare-metal.yml")
+    WebUiUrl       = "http://localhost:3001"
+    ThinkRouterUrl = "http://localhost:11435"
+    Backends       = @{
+        default = @{ url = "http://localhost:11434" }
+    }
+    BackendOrder   = @("default")
+    UsesDocker     = $false
 }
 
 $pcSingleConfig = @{
@@ -80,25 +102,37 @@ $pcDualConfig = @{
     UsesDocker     = $true
 }
 
+# PC config: dual GPU wins, then bare-metal Ollama (any vendor), then single NVIDIA GPU
+$configMode = if     ($GpuCount -ge 2)  { "dual" }
+              elseif ($OllamaRunning)    { "bare-metal" }
+              elseif ($GpuCount -eq 1)  { "single" }
+              else                       { "error" }
+
+if ($configMode -eq "error") {
+    Write-Error "No NVIDIA GPU detected and Ollama is not running on localhost:11434. Install NVIDIA drivers or start Ollama, then retry."
+    exit 1
+}
+
+$pcConfig = switch ($configMode) {
+    "dual"       { $pcDualConfig }
+    "bare-metal" { $bareMetalConfig }
+    "single"     { $pcSingleConfig }
+}
+
 $PlatformConfig = @{
-    mac = @{
-        ComposeFiles   = @("docker-compose.yml", "docker-compose.mac.yml")
-        WebUiUrl       = "http://localhost:3001"
-        ThinkRouterUrl = "http://localhost:11435"
-        Backends       = @{
-            default = @{ url = "http://localhost:11434" }
-        }
-        BackendOrder   = @("default")
-        UsesDocker     = $false
-    }
-    pc = if ($GpuCount -eq 1) { $pcSingleConfig } else { $pcDualConfig }
+    mac = $bareMetalConfig
+    pc  = $pcConfig
 }
 
 $Config = $PlatformConfig[$Platform]
 
 if ($Platform -eq "pc") {
-    $gpuLabel = if ($GpuCount -eq 1) { "1 GPU detected -> single-GPU config" } else { "$GpuCount GPU(s) detected -> dual-GPU config" }
-    Write-Host $gpuLabel -ForegroundColor DarkGray
+    $configLabel = switch ($configMode) {
+        "dual"       { "$GpuCount GPUs detected -> dual-GPU config" }
+        "bare-metal" { "Ollama on localhost:11434 -> bare-metal config (think-router on :11435)" }
+        "single"     { "1 GPU detected, no bare-metal Ollama -> single-GPU config" }
+    }
+    Write-Host $configLabel -ForegroundColor DarkGray
 }
 
 #endregion

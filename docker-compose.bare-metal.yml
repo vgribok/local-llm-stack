@@ -1,9 +1,11 @@
-# macOS overlay: bare-metal Ollama on host (Apple Silicon)
-# Usage: docker compose -f docker-compose.yml -f docker-compose.mac.yml up -d
+# Bare-metal Ollama overlay: Ollama running on host (any OS, any GPU vendor)
+# Usage: docker compose -f docker-compose.yml -f docker-compose.bare-metal.yml up -d
 #
 # Prerequisites:
 #   - Ollama running on host at localhost:11434
 #   - Models pulled: granite4.1:3b, nomic-embed-text, and your chat model(s)
+#
+# think-router exposes :11435 (not :11434) to avoid conflicting with host Ollama.
 
 services:
 

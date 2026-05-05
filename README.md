@@ -1,14 +1,14 @@
 # ai-stack
 
 Simplifies local agentic AI distribution: Open WebUI + adaptive thinking router + Tavily web search.<br/><br/>
-Runs everything* on Docker allowing for easy configuration changes and deployment. (On MacOS Ollama runs on bare-metal, not on Docker.)
+Runs everything* on Docker allowing for easy configuration changes and deployment. (On macOS Ollama runs on bare-metal, not on Docker.)
 
-**Cross-platform:** Windows (NVIDIA, single- or dual-GPU) and macOS (Apple Silicon with bare-metal Ollama).
+**Cross-platform:** Windows (NVIDIA, single- or dual-GPU; or any GPU with bare-metal Ollama) and macOS (Apple Silicon).
 
 This solution is suitable for any front-end using local Ollama back-end, like Cline extension
 of the VsCode, but is pre-integrated with bundled Open WebUI for search,
 thinking control, and for user input augmentation out of the box.<br/><br/>
-The system exposes a unified Ollama gateway at http://localhost:11434 (Windows) or http://localhost:11435 (macOS).
+The system exposes a unified Ollama gateway at http://localhost:11434 (Windows Docker) or http://localhost:11435 (bare-metal Ollama / macOS).
 On dual-GPU Windows PCs, large models run on the bigger VRAM card while task/embedding models run on the smaller one.
 On single-GPU or macOS, all models share one backend — the [router](./think-router/app.py) handles this transparently.
 
@@ -18,7 +18,7 @@ A self-hosted ChatGPT-style UI with web-search-grounded agents. A unified Ollama
 
 ## Stack
 
-### Windows (PC) — Dual GPU
+### Windows (PC) — Dual NVIDIA GPU
 
 | Service | Host port | GPU | Role |
 |---|---|---|---|
@@ -27,7 +27,7 @@ A self-hosted ChatGPT-style UI with web-search-grounded agents. A unified Ollama
 | `ollama-big` | 3003 | RTX 3090 Ti (24 GiB) | Chat / reasoning models |
 | `ollama-small` | 3004 | RTX 5060 Ti (16 GiB) | Task model + embeddings |
 
-### Windows (PC) — Single GPU
+### Windows (PC) — Single NVIDIA GPU
 
 | Service | Host port | GPU | Role |
 |---|---|---|---|
@@ -35,9 +35,9 @@ A self-hosted ChatGPT-style UI with web-search-grounded agents. A unified Ollama
 | `think-router` | **11434** | — | Unified Ollama gateway + adaptive thinking proxy |
 | `ollama-big` | 3003 | Any NVIDIA GPU | All models (chat, task, embeddings) |
 
-GPU count is detected automatically at startup via `nvidia-smi`. No manual configuration needed to select between the two PC layouts.
+Used when `nvidia-smi` reports exactly one GPU and Ollama is not already running on the host.
 
-### macOS (Apple Silicon) — Bare-metal Ollama
+### Bare-metal Ollama — macOS and non-NVIDIA Windows
 
 | Service | Host port | Role |
 |---|---|---|
@@ -45,13 +45,17 @@ GPU count is detected automatically at startup via `nvidia-smi`. No manual confi
 | `think-router` | **11435** | Unified Ollama gateway + adaptive thinking proxy |
 | Ollama (native) | 11434 | All models (chat, task, embeddings) |
 
+> **Port 11435:** think-router uses 11435 in this configuration so it doesn't conflict with Ollama already running on 11434. Point VS Code agents and other clients to `localhost:11435`, not `localhost:11434`.
+
+Used automatically on macOS (always) and on Windows when Ollama is already running on the host before `./ollama.ps1 start` — enabling AMD, Intel Arc, or any non-NVIDIA GPU without Docker GPU pass-through.
+
 External: **Tavily** for web search (free tier — 1k queries/month).
 
 ## Prerequisites
 
 ### Windows
-- Docker Desktop with WSL2 GPU support enabled
-- NVIDIA driver new enough for the GPUs to show in `nvidia-smi`
+- Docker Desktop with WSL2 backend enabled
+- NVIDIA drivers (for Docker GPU containers) **or** Ollama installed and running on the host
 - Tavily API key (free at [tavily.com](https://tavily.com))
 
 ### macOS
@@ -82,7 +86,7 @@ SMALL_GPU_ID=GPU-...
 
 ### 2. Platform-specific setup
 
-#### Windows (dual GPU)
+#### Windows (dual NVIDIA GPU)
 
 Find your GPU UUIDs and add them to `.env`:
 ```powershell
@@ -90,11 +94,7 @@ nvidia-smi --query-gpu=uuid,name --format=csv
 ```
 Set `BIG_GPU_ID` to the UUID of your larger-VRAM card and `SMALL_GPU_ID` to the smaller one.
 
-#### Windows (single GPU)
-
-No additional setup needed beyond the Tavily key — GPU count is detected automatically.
-
-#### macOS
+#### macOS / Windows with bare-metal Ollama
 
 Ensure Ollama is running:
 ```bash
@@ -108,31 +108,35 @@ ollama pull nomic-embed-text   # embeddings
 ollama pull qwen3.6:35b-a3b-coding-mxfp8  # or your preferred chat model
 ```
 
+#### Windows (single NVIDIA GPU, no bare-metal Ollama)
+
+No additional setup needed — GPU count is detected automatically.
+
 ### 3. Start the stack
 
 ```bash
-./ollama.ps1 start
+pwsh ./ollama.ps1 start
 ```
 
-This automatically detects your platform and GPU count, then uses the correct compose files:
-- **Windows (dual GPU):** `docker-compose.yml` + `docker-compose.pc-dual.yml`
-- **Windows (single GPU):** `docker-compose.yml` + `docker-compose.pc-single.yml`
-- **macOS:** `docker-compose.yml` + `docker-compose.mac.yml`
+This automatically selects the correct compose files:
+- **Windows (dual NVIDIA GPU):** `docker-compose.yml` + `docker-compose.pc-dual.yml`
+- **Windows (single NVIDIA GPU):** `docker-compose.yml` + `docker-compose.pc-single.yml`
+- **macOS / bare-metal Ollama:** `docker-compose.yml` + `docker-compose.bare-metal.yml`
 
-### 4. Pull models (Windows only)
+### 4. Pull models (Windows Docker only)
 
-On Windows, use the wrapper to route models to the correct backend:
+On Windows with Docker-hosted Ollama, use the wrapper to route models to the correct backend:
 ```powershell
 ./ollama.ps1 pull qwen3.6:27b       # dual GPU: -> big (by size);     single GPU: -> ollama-big
 ./ollama.ps1 pull granite4.1:3b     # dual GPU: -> small (by size);    single GPU: -> ollama-big
 ./ollama.ps1 pull nomic-embed-text  # dual GPU: -> small (by pattern); single GPU: -> ollama-big
 ```
 
-On macOS, models are pulled directly via `ollama pull` (or the wrapper, which just calls the native CLI).
+On macOS or bare-metal Windows, use `ollama pull` directly (or the wrapper, which calls the native CLI).
 
 ## Connecting a VS Code AI coding agent (Cline, Continue.dev, etc.)
 
-| Setting | Windows | macOS |
+| Setting | Windows (Docker Ollama) | macOS / bare-metal Ollama |
 |---|---|---|
 | Provider | Ollama | Ollama |
 | Base URL | `http://localhost:11434` | `http://localhost:11435` |
@@ -148,11 +152,13 @@ The agent gets model-aware routing, adaptive thinking classification, and the co
 
 **Single-GPU Windows uses one container** — All models share `ollama-big`. The think-router routes everything there; the big/small distinction is inert. Models live in a shared `~/.ollama` store.
 
+**Bare-metal overlay works for any GPU vendor** — Docker GPU pass-through on Windows requires NVIDIA drivers; AMD (ROCm is Linux-only) and Intel Arc GPUs cannot be passed into Windows Docker containers. The bare-metal overlay sidesteps this: Ollama runs natively with full GPU access, and Docker services connect via `host.docker.internal`. On Windows, this path is also selected automatically when Ollama is already running on port 11434 before `./ollama.ps1 start` is called.
+
 **Why bare-metal Ollama on macOS** — Apple Silicon's unified memory architecture means there's no GPU/CPU memory split to manage. Running Ollama natively gives the best performance and simplest setup. Docker containers would add overhead without benefit.
 
-**think-router is a unified gateway** — It merges `/api/tags` from all backends, routes requests to the correct backend, and applies adaptive thinking classification. On macOS and single-GPU Windows, both "big" and "small" URLs point to the same Ollama instance — the router handles this gracefully.
+**think-router is a unified gateway** — It merges `/api/tags` from all backends, routes requests to the correct backend, and applies adaptive thinking classification. On macOS and bare-metal Windows, both "big" and "small" URLs point to the same host Ollama instance — the router handles this gracefully.
 
-**Port 11435 on macOS** — The think-router exposes port 11435 to avoid conflicting with bare-metal Ollama on 11434. Clients (Cline, etc.) should connect to `localhost:11435` on Mac.
+**Port 11435 on bare-metal configurations** — think-router exposes port 11435 (not 11434) when using the bare-metal overlay, since host Ollama already occupies 11434. This applies to both macOS and bare-metal Windows.
 
 **GPU pinning on Windows uses `CUDA_VISIBLE_DEVICES`** — Docker Desktop on Windows ignores `NVIDIA_VISIBLE_DEVICES`. Filtering at the CUDA library level inside the container works. Dual-GPU uses UUIDs (not indices) because PCIe order can change; single-GPU defaults to device index 0.
 
@@ -172,9 +178,9 @@ Manual overrides `/think` and `/no_think` as the first token of a message bypass
 | Path | Purpose |
 |---|---|
 | `docker-compose.yml` | Shared base: think-router + open-webui |
-| `docker-compose.pc-dual.yml` | Windows overlay: dual-GPU, ollama-big + ollama-small with NVIDIA runtime |
-| `docker-compose.pc-single.yml` | Windows overlay: single-GPU, one ollama-big with NVIDIA runtime |
-| `docker-compose.mac.yml` | macOS overlay: points services to host.docker.internal Ollama |
+| `docker-compose.pc-dual.yml` | Windows overlay: dual NVIDIA GPU, ollama-big + ollama-small |
+| `docker-compose.pc-single.yml` | Windows overlay: single NVIDIA GPU, one ollama-big |
+| `docker-compose.bare-metal.yml` | Bare-metal overlay: connects to host Ollama (any OS, any GPU) |
 | `ollama.ps1` | Cross-platform wrapper for Ollama operations |
 | `think-router/app.py` | Unified Ollama gateway — model registry, routing, thinking proxy |
 | `think-router/test_app.py` | Unit tests for routing logic |
@@ -197,8 +203,8 @@ Manual overrides `/think` and `/no_think` as the first token of a message bypass
 |---|---|---|
 | 401 on every API call | Stale browser session | Sign out + sign in |
 | "No sources found" | Tavily key missing, or Web Search not toggled | Check `.env`; toggle in chat UI |
-| think-router can't reach Ollama (Mac) | Ollama not running | Run `ollama serve` or start Ollama app |
-| Port conflict on Mac | Both Ollama and think-router want 11434 | think-router uses 11435 on Mac; connect clients to that port |
+| think-router can't reach Ollama | Ollama not running on host | Run `ollama serve` or start Ollama app |
+| Client can't connect (bare-metal) | Wrong port — Ollama holds 11434 | think-router is on **11435** in bare-metal mode; update client URL |
 | GPU pinning not working (Windows) | `NVIDIA_VISIBLE_DEVICES` doesn't filter | Use `CUDA_VISIBLE_DEVICES=GPU-<UUID>` (dual GPU) or `CUDA_VISIBLE_DEVICES=0` (single GPU) |
 | Wrong compose file selected (Windows) | `nvidia-smi` not in PATH | Ensure NVIDIA drivers are installed; run `nvidia-smi` manually to verify |
 | Thinking always on / always off | Classifier not working | Check `docker logs ai-stack-think-router-1`; confirm granite4.1:3b is available |
@@ -207,10 +213,10 @@ Manual overrides `/think` and `/no_think` as the first token of a message bypass
 
 ```bash
 ./ollama.ps1 help              # show detailed help
-./ollama.ps1 start             # start stack (auto-detects platform and GPU count)
+./ollama.ps1 start             # start stack (auto-detects platform, GPU count, bare-metal Ollama)
 ./ollama.ps1 list              # list models (all backends)
 ./ollama.ps1 ps                # show loaded models
-./ollama.ps1 pull <model>      # pull model (Windows: auto-routes to correct backend)
+./ollama.ps1 pull <model>      # pull model (Windows Docker: auto-routes to correct backend)
 ./ollama.ps1 rm <model>        # delete model
 ./ollama.ps1 stop <model>      # unload from memory
 ./ollama.ps1 run <model>       # interactive chat
