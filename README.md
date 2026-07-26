@@ -217,6 +217,8 @@ The agent gets model-aware routing, adaptive thinking classification, and the co
 
 ## Wrapper commands
 
+Run `./ollama.ps1` with no arguments to see command options and get an interactive prompt.
+
 ```bash
 ./ollama.ps1 help              # show detailed help
 ./ollama.ps1 start             # start stack (auto-detects platform, GPU count, bare-metal Ollama)

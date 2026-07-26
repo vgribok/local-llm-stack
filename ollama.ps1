@@ -26,8 +26,7 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet("pull", "list", "ps", "rm", "stop", "show", "run", "size", "version", "start", "up", "diag", "help")]
+    [Parameter(Position = 0)]
     [string]$Command,
 
     [Parameter(Position = 1)]
@@ -41,6 +40,92 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+$ValidCommands = @("pull", "list", "ps", "rm", "stop", "show", "run", "size", "version", "start", "up", "diag", "help")
+$CommandDescriptions = [ordered]@{
+    pull    = "Pull a model (auto-routed to backend when applicable)."
+    list    = "List installed models across backend(s)."
+    ps      = "Show currently loaded/running models."
+    rm      = "Delete a model from disk."
+    stop    = "Unload a model from memory/VRAM."
+    show    = "Show metadata/details for a model."
+    run     = "Run interactive chat with a model (pulls first if needed)."
+    size    = "Query registry size for a model (without pulling)."
+    version = "Show Ollama version per backend."
+    start   = "Start stack with selected compose files and diagnostics."
+    up      = "Alias for start."
+    diag    = "Run loopback/native-conflict diagnostics on active ports."
+    help    = "Show this help with command reference."
+}
+
+function Show-AvailableCommands {
+    param([switch]$WithDescriptions)
+
+    Write-Host "Available commands:" -ForegroundColor Cyan
+    foreach ($c in $ValidCommands) {
+        if ($WithDescriptions) {
+            Write-Host ("  {0,-8} {1}" -f $c, $CommandDescriptions[$c])
+        }
+        else {
+            Write-Host "  - $c"
+        }
+    }
+}
+
+function Show-WrapperHelp {
+    Write-Host "NAME"
+    Write-Host "    ollama.ps1"
+    Write-Host ""
+
+    Write-Host "SYNOPSIS"
+    Write-Host "    Cross-platform wrapper for the ai-stack Ollama setup."
+    Write-Host ""
+
+    Write-Host "SYNTAX"
+    Write-Host "    ./ollama.ps1 [command] [model] [-Backend big|small|auto] [-ThresholdGB <number>]"
+    Write-Host ""
+
+    Write-Host "DESCRIPTION"
+    Write-Host "    Auto-selects platform mode (dual/single Docker backend or bare-metal)"
+    Write-Host "    and provides unified commands for model and stack operations."
+    Write-Host ""
+
+    Write-Host "PARAMETERS"
+    Write-Host "    Command      Operation to execute. If omitted, script prompts interactively."
+    Write-Host "    Model        Model name for model-specific commands (pull/rm/show/run/etc.)."
+    Write-Host "    -Backend     Force backend target (big|small|auto) where supported."
+    Write-Host "    -ThresholdGB Size threshold used by auto-routing in dual-GPU mode."
+    Write-Host ""
+
+    Write-Host "COMMANDS"
+    Show-AvailableCommands -WithDescriptions
+    Write-Host ""
+
+    Write-Host "EXAMPLES"
+    Write-Host "    ./ollama.ps1 start"
+    Write-Host "    ./ollama.ps1 list"
+    Write-Host "    ./ollama.ps1 pull qwen3.6:27b"
+    Write-Host "    ./ollama.ps1 diag"
+    Write-Host ""
+}
+
+if ([string]::IsNullOrWhiteSpace($Command)) {
+    Show-WrapperHelp
+
+    do {
+        $Command = (Read-Host "Enter command").Trim().ToLowerInvariant()
+    } while ([string]::IsNullOrWhiteSpace($Command))
+}
+
+$Command = $Command.Trim().ToLowerInvariant()
+if ($Command -notin $ValidCommands) {
+    throw "Invalid command '$Command'. Valid commands: $($ValidCommands -join ', ')"
+}
+
+if ($Command -eq "help") {
+    Show-WrapperHelp
+    return
+}
 
 #region Platform Detection & Configuration
 
@@ -512,7 +597,7 @@ function Start-Stack {
 switch ($Command) {
 
     "help" {
-        Get-Help $PSCommandPath -Detailed
+        Show-WrapperHelp
     }
 
     "diag" {
