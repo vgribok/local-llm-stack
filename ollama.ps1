@@ -54,7 +54,7 @@ $CommandDescriptions = [ordered]@{
     version = "Show Ollama version per backend."
     start   = "Start stack with selected compose files and diagnostics."
     up      = "Alias for start."
-    diag    = "Run loopback/native-conflict diagnostics on active ports."
+    diag    = "Run loopback/native-conflict diagnostics + image freshness checks."
     help    = "Show this help with command reference."
 }
 
@@ -105,7 +105,7 @@ function Show-WrapperHelp {
     Write-Host "    ./ollama.ps1 start"
     Write-Host "    ./ollama.ps1 list"
     Write-Host "    ./ollama.ps1 pull qwen3.6:27b"
-    Write-Host "    ./ollama.ps1 diag"
+    Write-Host "    ./ollama.ps1 diag   # includes Docker image update warnings"
     Write-Host ""
 }
 
@@ -551,17 +551,232 @@ function Test-NativeOllamaConflictOnPort([int]$Port) {
     return $true
 }
 
+function Get-DockerServerPlatform {
+    <#
+    .SYNOPSIS
+        Return Docker server platform (os/arch), normalized for manifest matching.
+    #>
+    try {
+        $platformRaw = (& docker version --format "{{.Server.Os}}/{{.Server.Arch}}" 2>$null)
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($platformRaw)) {
+            return $null
+        }
+
+        $parts = $platformRaw.Trim().Split("/", 2)
+        if ($parts.Count -ne 2) {
+            return $null
+        }
+
+        $os = $parts[0].ToLowerInvariant()
+        $arch = $parts[1].ToLowerInvariant()
+
+        switch ($arch) {
+            "x86_64" { $arch = "amd64" }
+            "aarch64" { $arch = "arm64" }
+        }
+
+        return [pscustomobject]@{
+            Os   = $os
+            Arch = $arch
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-LocalImageDigest {
+    <#
+    .SYNOPSIS
+        Get the local repo digest (sha256:...) for an image repository if pulled.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Repository,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Tag
+    )
+
+    $imageRef = "${Repository}:${Tag}"
+
+    try {
+        $repoDigestsJson = (& docker image inspect --format "{{json .RepoDigests}}" $imageRef 2>$null)
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($repoDigestsJson)) {
+            return $null
+        }
+
+        $repoDigests = @($repoDigestsJson | ConvertFrom-Json)
+        if ($repoDigests.Count -eq 0) {
+            return $null
+        }
+
+        $match = $repoDigests | Where-Object { $_ -like "${Repository}@*" } | Select-Object -First 1
+        if (-not $match) {
+            # Fallback: if repo prefix differs unexpectedly, still use first digest entry.
+            $match = $repoDigests | Select-Object -First 1
+        }
+
+        if ($match -notlike "*@*") {
+            return $null
+        }
+
+        return (($match -split "@", 2)[1])
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-RemoteImageDigest {
+    <#
+    .SYNOPSIS
+        Get remote tag/index digest (sha256:...) for an image tag.
+        This matches Docker local RepoDigests semantics (repo:tag@sha256:<index-or-manifest-digest>).
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Repository,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Tag,
+
+        [Parameter(Mandatory = $false)]
+        [string]$PlatformOs,
+
+        [Parameter(Mandatory = $false)]
+        [string]$PlatformArch
+    )
+
+    $imageRef = "${Repository}:${Tag}"
+
+    try {
+        # Preferred: Docker imagetools reports the tag/index digest directly:
+        #   Digest: sha256:<...>
+        # This is the same digest Docker records in local RepoDigests.
+        $inspectText = (& docker buildx imagetools inspect $imageRef 2>$null | Out-String)
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($inspectText)) {
+            $m = [regex]::Match($inspectText, "(?m)^Digest:\s*(sha256:[a-f0-9]{64})\s*$")
+            if ($m.Success) {
+                return $m.Groups[1].Value
+            }
+        }
+
+        # Fallback: try docker manifest inspect (less preferred here, but keeps compatibility).
+        # This path may not always expose tag/index digest; when unavailable we return $null.
+        $manifestJson = (& docker manifest inspect $imageRef 2>$null | Out-String)
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($manifestJson)) {
+            return $null
+        }
+
+        $manifestRaw = $manifestJson | ConvertFrom-Json
+
+        # Rarely, some responses include an explicit digest property.
+        if ($manifestRaw -and $manifestRaw.digest) {
+            return [string]$manifestRaw.digest
+        }
+
+        return $null
+    }
+    catch {
+        return $null
+    }
+}
+
+function Invoke-ImageFreshnessDiagnostics {
+    <#
+    .SYNOPSIS
+        Warn when pulled Docker images are older than the current remote tag digest.
+    #>
+    if (-not $Config.UsesDocker) {
+        Write-Host "Image diagnostics: skipped (current mode is non-Docker backend)." -ForegroundColor DarkGray
+        return
+    }
+
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Write-Host "Image diagnostics: docker CLI not found; skipping image freshness checks." -ForegroundColor DarkGray
+        return
+    }
+
+    $platform = Get-DockerServerPlatform
+    if (-not $platform) {
+        Write-Host "Image diagnostics: could not determine Docker server platform; skipping image freshness checks." -ForegroundColor DarkGray
+        return
+    }
+
+    $imageTargets = @()
+    $imageTargets += [pscustomobject]@{ Label = "Ollama"; Repository = "ollama/ollama"; Tag = "latest" }
+    $imageTargets += [pscustomobject]@{ Label = "Open WebUI"; Repository = "ghcr.io/open-webui/open-webui"; Tag = "latest" }
+
+    foreach ($img in $imageTargets) {
+        $localDigest = Get-LocalImageDigest -Repository $img.Repository -Tag $img.Tag
+        if (-not $localDigest) {
+            Write-Host "Image diagnostics: $($img.Label) ($($img.Repository):$($img.Tag)) is not pulled locally; skipping freshness check." -ForegroundColor DarkGray
+            continue
+        }
+
+        $remoteDigest = Get-RemoteImageDigest -Repository $img.Repository -Tag $img.Tag -PlatformOs $platform.Os -PlatformArch $platform.Arch
+        if (-not $remoteDigest) {
+            Write-Warning "Image diagnostics: could not resolve remote digest for $($img.Repository):$($img.Tag)."
+            continue
+        }
+
+        if ($localDigest -ne $remoteDigest) {
+            Write-Warning "$($img.Label) image is out of date: local digest $localDigest != remote digest $remoteDigest"
+            Write-Host "Update with: docker pull $($img.Repository):$($img.Tag)" -ForegroundColor Yellow
+
+            $serviceRefreshHint = switch ($img.Label) {
+                "Ollama" {
+                    if ($Config.BackendOrder.Count -gt 1) {
+                        "docker compose up -d --no-deps ollama-big ollama-small"
+                    }
+                    else {
+                        "docker compose up -d --no-deps ollama-big"
+                    }
+                }
+                "Open WebUI" { "docker compose up -d --no-deps open-webui" }
+                default { $null }
+            }
+
+            if ($serviceRefreshHint) {
+                Write-Host "Less disruptive apply: $serviceRefreshHint" -ForegroundColor DarkYellow
+            }
+
+            Write-Host "Fallback/full refresh: ./ollama.ps1 start" -ForegroundColor Yellow
+        }
+        else {
+            Write-Host "Image diagnostics: $($img.Label) image is up to date ($localDigest)." -ForegroundColor DarkGray
+        }
+    }
+}
+
+function Invoke-SharedDiagnostics {
+    <#
+    .SYNOPSIS
+        Shared diagnostics for both `diag` and `start`.
+    #>
+    param(
+        [switch]$SkipImageFreshness
+    )
+
+    $portsToCheck = Get-DiagnosticPorts
+    $routerPort = ([uri]$Config.ThinkRouterUrl).Port
+
+    Invoke-LoopbackDiagnostics -Ports $portsToCheck
+    Test-NativeOllamaConflictOnPort -Port $routerPort | Out-Null
+
+    if (-not $SkipImageFreshness) {
+        Invoke-ImageFreshnessDiagnostics
+    }
+}
+
 function Start-Stack {
     <#
     .SYNOPSIS
         Start the Docker Compose stack with platform-appropriate compose files.
     #>
-    $portsToCheck = Get-DiagnosticPorts
-    $routerPort = ([uri]$Config.ThinkRouterUrl).Port
-
     Write-Host "Running preflight loopback diagnostics..." -ForegroundColor DarkGray
-    Invoke-LoopbackDiagnostics -Ports $portsToCheck
-    Test-NativeOllamaConflictOnPort -Port $routerPort | Out-Null
+    Invoke-SharedDiagnostics
 
     $composeArgs = @()
     foreach ($f in $Config.ComposeFiles) {
@@ -576,8 +791,7 @@ function Start-Stack {
     }
 
     Write-Host "Running post-start loopback diagnostics..." -ForegroundColor DarkGray
-    Invoke-LoopbackDiagnostics -Ports $portsToCheck
-    Test-NativeOllamaConflictOnPort -Port $routerPort | Out-Null
+    Invoke-SharedDiagnostics -SkipImageFreshness
 
     Write-Host "All containers healthy. Opening $($Config.WebUiUrl) ..." -ForegroundColor Green
 
@@ -601,8 +815,7 @@ switch ($Command) {
     }
 
     "diag" {
-        $portsToCheck = Get-DiagnosticPorts
-        Invoke-LoopbackDiagnostics -Ports $portsToCheck
+        Invoke-SharedDiagnostics
     }
 
     "version" {
