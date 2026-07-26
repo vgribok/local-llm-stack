@@ -208,15 +208,20 @@ The agent gets model-aware routing, adaptive thinking classification, and the co
 | "No sources found" | Tavily key missing, or Web Search not toggled | Check `.env`; toggle in chat UI |
 | think-router can't reach Ollama | Ollama not running on host | Run `ollama serve` or start Ollama app |
 | Client can't connect (bare-metal) | Wrong port — Ollama holds 11434 | think-router is on **11435** in bare-metal mode; update client URL |
+| Client/CLI sees empty models while `curl localhost` shows models | Loopback split-brain (`localhost`, `127.0.0.1`, and `::1` resolve to different services on same port) | Run `./ollama.ps1 diag`; choose one canonical URL (recommended `localhost`) for all clients; stop duplicate service on that port; set `OLLAMA_HOST` explicitly for CLI if needed |
 | GPU pinning not working (Windows) | `NVIDIA_VISIBLE_DEVICES` doesn't filter | Use `CUDA_VISIBLE_DEVICES=GPU-<UUID>` (dual GPU) or `CUDA_VISIBLE_DEVICES=0` (single GPU) |
 | Wrong compose file selected (Windows) | `nvidia-smi` not in PATH | Ensure NVIDIA drivers are installed; run `nvidia-smi` manually to verify |
 | Thinking always on / always off | Classifier not working | Check `docker logs ai-stack-think-router-1`; confirm granite4.1:3b is available |
+
+`./ollama.ps1 start` now runs a cross-platform preflight/post-start loopback diagnostic **plus an explicit native-Ollama conflict check** on the active think-router port, warning when `localhost` and `127.0.0.1` resolve to different Ollama-compatible services.
 
 ## Wrapper commands
 
 ```bash
 ./ollama.ps1 help              # show detailed help
 ./ollama.ps1 start             # start stack (auto-detects platform, GPU count, bare-metal Ollama)
+./ollama.ps1 diag              # detect localhost/127.0.0.1/::1 endpoint conflicts on Ollama ports
+./ollama.ps1 version           # show Ollama version per backend
 ./ollama.ps1 list              # list models (all backends)
 ./ollama.ps1 ps                # show loaded models
 ./ollama.ps1 pull <model>      # pull model (Windows Docker: auto-routes to correct backend)

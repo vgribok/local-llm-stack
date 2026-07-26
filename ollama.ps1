@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet("pull", "list", "ps", "rm", "stop", "show", "run", "size", "start", "up", "help")]
+    [ValidateSet("pull", "list", "ps", "rm", "stop", "show", "run", "size", "version", "start", "up", "diag", "help")]
     [string]$Command,
 
     [Parameter(Position = 1)]
@@ -283,11 +283,201 @@ function Resolve-ExistingBackend([string]$name) {
     return $found
 }
 
+function Get-EndpointProbe([string]$BaseUrl) {
+    <#
+    .SYNOPSIS
+        Probe an Ollama-compatible endpoint and return version/server/model-count details.
+    #>
+    $versionUrl = "$BaseUrl/api/version"
+    $tagsUrl = "$BaseUrl/api/tags"
+
+    try {
+        $versionResp = Invoke-WebRequest -Uri $versionUrl -TimeoutSec 2
+
+        $server = ""
+        if ($versionResp.Headers["Server"]) {
+            $server = [string]$versionResp.Headers["Server"]
+        }
+
+        $version = $null
+        try {
+            $version = (ConvertFrom-Json $versionResp.Content).version
+        }
+        catch { }
+
+        $modelCount = $null
+        try {
+            $tags = Invoke-RestMethod -Uri $tagsUrl -TimeoutSec 2
+            $modelCount = @($tags.models).Count
+        }
+        catch { }
+
+        return [pscustomobject]@{
+            BaseUrl    = $BaseUrl
+            Reachable  = $true
+            Version    = $version
+            Server     = $server
+            ModelCount = $modelCount
+            Error      = ""
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            BaseUrl    = $BaseUrl
+            Reachable  = $false
+            Version    = $null
+            Server     = ""
+            ModelCount = $null
+            Error      = $_.Exception.Message
+        }
+    }
+}
+
+function Test-LoopbackPortConflict([int]$Port) {
+    <#
+    .SYNOPSIS
+        Detect split-loopback conflicts where localhost/127.0.0.1/::1 on the same port
+        resolve to different Ollama-compatible services.
+    #>
+    $targets = @(
+        "http://localhost:$Port",
+        "http://127.0.0.1:$Port",
+        "http://[::1]:$Port"
+    )
+
+    $probes = foreach ($t in $targets) { Get-EndpointProbe $t }
+    $reachable = @($probes | Where-Object { $_.Reachable })
+
+    if ($reachable.Count -lt 2) {
+        return $false
+    }
+
+    $fingerprints = @(
+        $reachable | ForEach-Object {
+            $v = if ($null -ne $_.Version) { [string]$_.Version } else { "<none>" }
+            $s = if ([string]::IsNullOrWhiteSpace($_.Server)) { "<none>" } else { $_.Server }
+            $m = if ($null -ne $_.ModelCount) { [string]$_.ModelCount } else { "<unknown>" }
+            "$v|$s|$m"
+        }
+    )
+
+    if ((@($fingerprints | Select-Object -Unique)).Count -gt 1) {
+        Write-Warning "Detected loopback endpoint conflict on port ${Port}: localhost / 127.0.0.1 / ::1 are not equivalent."
+        $reachable |
+            Select-Object BaseUrl, Version, Server, ModelCount |
+            Format-Table -AutoSize
+
+        Write-Host "Remediation (cross-platform):" -ForegroundColor Yellow
+        Write-Host "  1) Point all clients to a single canonical URL (recommended: http://localhost:$Port)."
+        Write-Host "  2) Stop whichever duplicate Ollama/Router service is unintentionally bound on the same port."
+        Write-Host "  3) If using CLI, set OLLAMA_HOST explicitly to that canonical URL."
+        return $true
+    }
+
+    return $false
+}
+
+function Invoke-LoopbackDiagnostics([int[]]$Ports) {
+    <#
+    .SYNOPSIS
+        Run split-loopback diagnostics across one or more ports.
+    #>
+    $uniquePorts = @($Ports | Sort-Object -Unique)
+    if ($uniquePorts.Count -eq 0) {
+        return
+    }
+
+    $conflicts = 0
+    foreach ($port in $uniquePorts) {
+        if (Test-LoopbackPortConflict -Port $port) {
+            $conflicts++
+        }
+    }
+
+    if ($conflicts -eq 0) {
+        Write-Host "Loopback diagnostics: OK - no split-brain conflicts detected on tested ports ($($uniquePorts -join ', '))." -ForegroundColor DarkGray
+    }
+}
+
+function Get-DiagnosticPorts {
+    <#
+    .SYNOPSIS
+        Build the list of ports to probe from the active config (router + backend URLs).
+    #>
+    $ports = @()
+
+    try {
+        $ports += ([uri]$Config.ThinkRouterUrl).Port
+    }
+    catch { }
+
+    foreach ($backend in $Config.Backends.Values) {
+        if (-not $backend.url) { continue }
+        try {
+            $ports += ([uri]$backend.url).Port
+        }
+        catch { }
+    }
+
+    return @($ports | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
+}
+
+function Test-NativeOllamaConflictOnPort([int]$Port) {
+    <#
+    .SYNOPSIS
+        Dedicated guardrail for a common conflict: native Ollama bound on IPv4 loopback
+        while think-router is reached via localhost/IPv6 on the same port.
+    #>
+    $localhostProbe = Get-EndpointProbe "http://localhost:$Port"
+    $ipv4Probe = Get-EndpointProbe "http://127.0.0.1:$Port"
+
+    if (-not ($localhostProbe.Reachable -and $ipv4Probe.Reachable)) {
+        return $false
+    }
+
+    $localhostFp = "{0}|{1}|{2}" -f (
+        $(if ($null -ne $localhostProbe.Version) { [string]$localhostProbe.Version } else { "<none>" }),
+        $(if ([string]::IsNullOrWhiteSpace($localhostProbe.Server)) { "<none>" } else { $localhostProbe.Server }),
+        $(if ($null -ne $localhostProbe.ModelCount) { [string]$localhostProbe.ModelCount } else { "<unknown>" })
+    )
+
+    $ipv4Fp = "{0}|{1}|{2}" -f (
+        $(if ($null -ne $ipv4Probe.Version) { [string]$ipv4Probe.Version } else { "<none>" }),
+        $(if ([string]::IsNullOrWhiteSpace($ipv4Probe.Server)) { "<none>" } else { $ipv4Probe.Server }),
+        $(if ($null -ne $ipv4Probe.ModelCount) { [string]$ipv4Probe.ModelCount } else { "<unknown>" })
+    )
+
+    if ($localhostFp -eq $ipv4Fp) {
+        return $false
+    }
+
+    Write-Warning "Native Ollama conflict check: localhost and 127.0.0.1 differ on port ${Port}."
+    Write-Host "This usually means two Ollama-compatible services are bound to the same port (e.g., native Ollama + think-router)." -ForegroundColor Yellow
+
+    @($localhostProbe, $ipv4Probe) |
+        Select-Object BaseUrl, Version, Server, ModelCount |
+        Format-Table -AutoSize
+
+    Write-Host "Recommended action:" -ForegroundColor Yellow
+    Write-Host "  - Keep only one intended service on port ${Port}."
+    Write-Host "  - Point all clients/CLI to one canonical URL (recommended: http://localhost:${Port})."
+    Write-Host "  - If needed, set OLLAMA_HOST explicitly for CLI sessions."
+
+    return $true
+}
+
 function Start-Stack {
     <#
     .SYNOPSIS
         Start the Docker Compose stack with platform-appropriate compose files.
     #>
+    $portsToCheck = Get-DiagnosticPorts
+    $routerPort = ([uri]$Config.ThinkRouterUrl).Port
+
+    Write-Host "Running preflight loopback diagnostics..." -ForegroundColor DarkGray
+    Invoke-LoopbackDiagnostics -Ports $portsToCheck
+    Test-NativeOllamaConflictOnPort -Port $routerPort | Out-Null
+
     $composeArgs = @()
     foreach ($f in $Config.ComposeFiles) {
         $composeArgs += @("-f", (Join-Path $PSScriptRoot $f))
@@ -299,6 +489,10 @@ function Start-Stack {
     if ($LASTEXITCODE -ne 0) {
         throw "docker compose up failed (exit $LASTEXITCODE). Stack is not ready; not opening browser."
     }
+
+    Write-Host "Running post-start loopback diagnostics..." -ForegroundColor DarkGray
+    Invoke-LoopbackDiagnostics -Ports $portsToCheck
+    Test-NativeOllamaConflictOnPort -Port $routerPort | Out-Null
 
     Write-Host "All containers healthy. Opening $($Config.WebUiUrl) ..." -ForegroundColor Green
 
@@ -319,6 +513,24 @@ switch ($Command) {
 
     "help" {
         Get-Help $PSCommandPath -Detailed
+    }
+
+    "diag" {
+        $portsToCheck = Get-DiagnosticPorts
+        Invoke-LoopbackDiagnostics -Ports $portsToCheck
+    }
+
+    "version" {
+        if ($Config.UsesDocker) {
+            foreach ($key in $Config.BackendOrder) {
+                Write-Host "=== $key version ===" -ForegroundColor Cyan
+                Invoke-Ollama -BackendKey $key -Arguments @("--version")
+                Write-Host ""
+            }
+        }
+        else {
+            Invoke-Ollama -Arguments @("--version")
+        }
     }
 
     "pull" {
