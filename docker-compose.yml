@@ -17,7 +17,7 @@ services:
       - UPSTREAM_URL=${UPSTREAM_URL:-http://ollama-big:11434}
       - SMALL_UPSTREAM_URL=${SMALL_UPSTREAM_URL:-http://ollama-small:11434}
       - CLASSIFIER_URL=${CLASSIFIER_URL:-http://ollama-small:11434}
-      - CLASSIFIER_MODEL=granite4.1:3b
+      - CLASSIFIER_MODEL=${CLASSIFIER_MODEL:-granite4.1:3b}
       - EXCLUDE_MODELS=
       - INCLUDE_MODELS=
       - ROUTER_DEBUG_DECISIONS=${ROUTER_DEBUG_DECISIONS:-1}
