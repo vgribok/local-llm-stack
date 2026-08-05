@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -37,6 +38,13 @@ SMALL_UPSTREAM_URL = os.environ.get("SMALL_UPSTREAM_URL", "http://ollama-small:1
 CLASSIFIER_URL     = os.environ.get("CLASSIFIER_URL",     "http://ollama-small:11434")
 CLASSIFIER_MODEL   = os.environ.get("CLASSIFIER_MODEL",   "granite4.1:3b")
 CLASSIFIER_TIMEOUT_S = float(os.environ.get("CLASSIFIER_TIMEOUT_S", "8"))
+
+# When a message carries RAG/web-search context (an injected <context>...</context>
+# block), classify the *actual* question with the context stripped out — a
+# "what time is it in the Maldives" web lookup should still classify NO. Only
+# short-circuit to think=True when the injected context is large enough to look
+# like genuine document synthesis rather than a one-line web fact.
+RAG_THINK_MIN_CONTEXT_CHARS = int(os.environ.get("RAG_THINK_MIN_CONTEXT_CHARS", "6000"))
 
 # Injected into the system message whenever thinking is enabled.
 # Empirically halves thinking token count without truncating the answer.
@@ -125,6 +133,20 @@ def _last_user_message(messages: list[dict]) -> str:
             if isinstance(content, list):
                 return " ".join(p.get("text", "") for p in content if isinstance(p, dict))
     return ""
+
+
+_CONTEXT_BLOCK_RE = re.compile(r"<context>.*?</context>", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_context(text: str) -> str:
+    """Remove injected <context>...</context> RAG/web-search blocks so the
+    classifier judges the user's actual question, not the retrieved documents."""
+    return _CONTEXT_BLOCK_RE.sub(" ", text).strip()
+
+
+def _context_chars(text: str) -> int:
+    """Total length of injected <context>...</context> blocks in the message."""
+    return sum(len(m.group(0)) for m in _CONTEXT_BLOCK_RE.finditer(text))
 
 
 def _override_from_prefix(text: str) -> Optional[bool]:
@@ -253,16 +275,20 @@ async def _maybe_set_think(body: dict, trace_id: str) -> dict:
                       client_supplied_think=client_supplied_think)
         return body
 
-    # RAG-augmented message: document synthesis almost always benefits from full deliberation.
-    if "<context>" in last:
+    # RAG-augmented message: large injected context looks like genuine document
+    # synthesis and benefits from full deliberation. But web search wraps trivial
+    # factual lookups ("time in the Maldives") in <context> too, so only
+    # short-circuit for large payloads; otherwise strip the context and let the
+    # classifier judge the actual question.
+    if "<context>" in last and _context_chars(last) >= RAG_THINK_MIN_CONTEXT_CHARS:
         body["think"] = True
         _apply_thinking_controls(body)
-        log.info("model=%s think=True (rag-detected)", model)
+        log.info("model=%s think=True (rag-detected, %d ctx chars)", model, _context_chars(last))
         _decision_log(trace_id, model=model, reason="rag-detected", body=body,
                       client_supplied_think=client_supplied_think)
         return body
 
-    tier = await _classify(last)
+    tier = await _classify(_strip_context(last))
     if tier is None:
         body["think"] = True
         _apply_thinking_controls(body)

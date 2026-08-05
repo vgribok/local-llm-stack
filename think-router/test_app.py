@@ -104,6 +104,66 @@ class TestApplyThinkingControls(unittest.TestCase):
         self.assertEqual(body["messages"][0]["role"], "system")
 
 
+class TestStripContext(unittest.TestCase):
+    def test_removes_context_block(self):
+        text = "What time is it in the Maldives? <context>doc snippet here</context>"
+        self.assertEqual(app_mod._strip_context(text), "What time is it in the Maldives?")
+
+    def test_removes_multiline_block(self):
+        text = "Question\n<context>\nline1\nline2\n</context>\nmore"
+        stripped = app_mod._strip_context(text)
+        self.assertNotIn("line1", stripped)
+        self.assertIn("Question", stripped)
+        self.assertIn("more", stripped)
+
+    def test_no_context_unchanged(self):
+        self.assertEqual(app_mod._strip_context("plain question"), "plain question")
+
+    def test_context_chars_counts_block(self):
+        block = "<context>" + "x" * 100 + "</context>"
+        text = "q " + block
+        self.assertEqual(app_mod._context_chars(text), len(block))
+
+    def test_context_chars_zero_without_block(self):
+        self.assertEqual(app_mod._context_chars("no context here"), 0)
+
+
+class TestMaybeSetThinkRag(unittest.IsolatedAsyncioTestCase):
+    def _body(self, content):
+        return {"model": "qwen3.6:35b", "messages": [{"role": "user", "content": content}]}
+
+    async def test_small_web_context_falls_through_to_classifier(self):
+        """A short web-search <context> must NOT force think; the classifier
+        judges the stripped question instead."""
+        captured = {}
+
+        async def fake_classify(prompt):
+            captured["prompt"] = prompt
+            return "NO"
+
+        content = "What time is it in the Maldives? <context>Malé, Maldives — 3:24 PM (UTC+5)</context>"
+        with patch.object(app_mod, "_is_thinking_capable", AsyncMock(return_value=True)), \
+             patch.object(app_mod, "_classify", fake_classify):
+            body = await app_mod._maybe_set_think(self._body(content), "t1")
+
+        self.assertIs(body["think"], False)
+        self.assertNotIn("<context>", captured["prompt"])
+        self.assertIn("Maldives", captured["prompt"])
+
+    async def test_large_context_forces_think(self):
+        """A large injected context looks like document synthesis and short-circuits
+        to think=True without calling the classifier."""
+        big_ctx = "<context>" + ("lorem ipsum " * 1000) + "</context>"
+        content = "Summarize this document. " + big_ctx
+
+        with patch.object(app_mod, "_is_thinking_capable", AsyncMock(return_value=True)), \
+             patch.object(app_mod, "_classify", AsyncMock(side_effect=AssertionError(
+                 "classifier must not run for large RAG context"))):
+            body = await app_mod._maybe_set_think(self._body(content), "t2")
+
+        self.assertIs(body["think"], True)
+
+
 class TestIsStreaming(unittest.TestCase):
     def test_defaults_true(self):
         self.assertTrue(app_mod._is_streaming({}))
