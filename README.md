@@ -32,7 +32,7 @@ think-router is an Ollama-compatible HTTP proxy ([source](./think-router/app.py)
 
 ## Stack
 
-### Windows (PC) — Dual NVIDIA GPU
+### Docker on Windows (PC) — Dual NVIDIA GPU
 
 | Service | Host port | GPU | Role |
 |---|---|---|---|
@@ -41,7 +41,7 @@ think-router is an Ollama-compatible HTTP proxy ([source](./think-router/app.py)
 | `ollama-big` | 3003 | RTX 3090 Ti (24 GiB) | Chat / reasoning models |
 | `ollama-small` | 3004 | RTX 5060 Ti (16 GiB) | Task model + embeddings |
 
-### Windows (PC) — Single NVIDIA GPU
+### Docker on Windows (PC) — Single NVIDIA GPU
 
 | Service | Host port | GPU | Role |
 |---|---|---|---|
@@ -137,9 +137,11 @@ This automatically selects the correct compose files:
 - **Windows (single NVIDIA GPU):** `docker-compose.yml` + `docker-compose.pc-single.yml`
 - **macOS / bare-metal Ollama:** `docker-compose.yml` + `docker-compose.bare-metal.yml`
 
-### 4. Pull models (Windows Docker only)
+### 4. Pull models
 
-On Windows with Docker-hosted Ollama, use the wrapper to route models to the correct backend:
+The wrapper works on every platform. On Windows with Docker-hosted Ollama it routes each model to the correct backend by size; on macOS and bare-metal Windows it delegates straight to the native `ollama` CLI.
+
+On Windows with Docker-hosted Ollama:
 ```powershell
 ./ollama.ps1 pull qwen3.6:27b       # dual GPU: -> big (by size);     single GPU: -> ollama-big
 ./ollama.ps1 pull granite4.1:3b     # dual GPU: -> small (by size);    single GPU: -> ollama-big
