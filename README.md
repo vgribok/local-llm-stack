@@ -1,19 +1,20 @@
 # Local AI Stack
 
-Simplifies local agentic AI distribution: Open WebUI + adaptive thinking router + Tavily web search.<br/><br/>
-Runs everything* on Docker allowing for easy configuration changes and deployment. (On macOS Ollama runs on bare-metal, not on Docker.)
+A self-hosted, Ollama-compatible AI stack that makes local models **faster to respond, better-utilized on mismatched GPUs, and easy to tune** — a ChatGPT-style UI (Open WebUI) with web-search-grounded agents, fronted by an adaptive **think-router** that speaks the Ollama API.
 
-**Cross-platform:** Windows (NVIDIA, single- or dual-GPU; or any GPU with bare-metal Ollama) and macOS (Apple Silicon).
+**What it gives you:**
 
-**think-router** acts as a drop-in Ollama proxy — any client that speaks the Ollama API (Open WebUI, Cline, Continue.dev, curl) points at it instead of Ollama directly and gets adaptive thinking classification and multi-backend routing for free. The stack exposes a single Ollama-compatible endpoint at `http://localhost:11434` (Windows Docker) or `http://localhost:11435` (bare-metal / macOS).
+1. **Faster responses — thinking only when it helps.** think-router is a drop-in Ollama proxy: any client that speaks the Ollama API (Open WebUI, Cline, Continue.dev, `curl`) points at it *instead of* Ollama and gets adaptive thinking for free — no plugin, no code change. A tiny classifier decides per-prompt whether extended thinking is worth the latency, so a factual lookup like "what time is it in the Maldives" answers immediately instead of burning 10–30s of reasoning, while genuinely hard problems still get full think time. No manual `/think` toggling.
 
-## What it does
+2. **Better use of mismatched dual-GPU desktops.** On a Windows box with two differently-sized NVIDIA cards (e.g. a 24 GiB 3090 Ti + a 16 GiB 5060 Ti), the stack runs one pinned Ollama container per GPU and **deterministically places each model**: the large chat/reasoning model stays whole on the big card, while the classifier, task model, and embeddings run in parallel on the small card. This avoids Ollama's default of splitting an oversized model across both cards over the PCIe bus (there's no NVLink on consumer GPUs), which tanks inference speed — and it keeps both mismatched cards working in their assigned roles instead of leaving placement to the scheduler.
 
-A self-hosted ChatGPT-style UI with web-search-grounded agents, backed by a unified Ollama gateway that automatically manages extended thinking, model routing, and backend selection across one or more GPUs.
+3. **All tuning exposed as Docker + env config.** Context-window size, GPU pinning, the classifier model, web search, embeddings — every knob that drives the two features above is a text setting in `.env` or a compose file, not buried in a UI. That also means a coding agent can tune the stack for you: *"bump context to 64k"*, *"switch the classifier to phi4-mini"*.
+
+**Cross-platform:** Windows (NVIDIA single- or dual-GPU; or any GPU via bare-metal Ollama) and macOS (Apple Silicon). One command auto-detects your setup. Everything runs on Docker except Ollama on macOS, which runs bare-metal for full unified-memory access. The stack exposes a single Ollama-compatible endpoint at `http://localhost:11434` (Windows Docker) or `http://localhost:11435` (bare-metal / macOS).
 
 ## think-router
 
-think-router is an Ollama-compatible HTTP proxy ([source](./think-router/app.py)). Any client that speaks the Ollama API — Open WebUI, Cline, Continue.dev, LM Studio, or plain `curl` — connects to think-router instead of Ollama directly and gets the following automatically, with no plugin or custom integration needed:
+think-router is an Ollama-compatible HTTP proxy/adapter ([source](./think-router/app.py)). Any client that speaks the Ollama API — Open WebUI, Cline, Continue.dev, LM Studio, or plain `curl` — connects to think-router instead of Ollama directly and gets the following automatically, with no plugin or custom integration needed:
 
 - **Adaptive thinking** — Each prompt is classified by `granite4.1:3b` to decide whether to enable extended thinking on the main model. Complex reasoning and architecture questions get full think time; factual lookups and simple code snippets skip it. Without this you must toggle thinking manually per request, or accept always-on (high latency for every message) or always-off (no deep reasoning).
 - **Unified model registry** — On dual-GPU setups, think-router merges `/api/tags` from both Ollama instances. Clients see one Ollama with all models; think-router routes each request to the backend that holds the model.
@@ -26,7 +27,9 @@ think-router is an Ollama-compatible HTTP proxy ([source](./think-router/app.py)
 | HIGH | Complex reasoning, non-trivial code, planning, architecture | on + conciseness hint |
 | LOW | Simple-to-moderate code, short explanations | off |
 | NO | Factual lookups, definitions, conversational | off |
-| RAG | `<context>` tag detected in message | on + conciseness hint |
+| RAG | Large `<context>` block detected (document synthesis) | on + conciseness hint |
+
+RAG detection has a size gate (`RAG_THINK_MIN_CONTEXT_CHARS`, default 6000): only a *large* injected `<context>` block — genuine document synthesis — short-circuits to thinking on. Small blocks (e.g. web-search snippets for a factual question) are stripped before classification, so the actual question is judged on its own merits and a quick lookup stays fast.
 
 **Manual overrides** — prefix a message with `/think` or `/no_think` to bypass the classifier for that turn.
 
@@ -89,13 +92,21 @@ External: **Tavily** for web search (free tier — 1k queries/month).
 TAVILY_API_KEY=tvly-...
 
 # Dual-GPU Windows only
-BIG_CONTEXT_LENGTH=48000   # context window tokens; 48000 suits a 24 GiB card
+BIG_CONTEXT_LENGTH=48000   # big-model context window tokens (default 48000; larger cards can go higher)
 BIG_GPU_ID=GPU-...         # run: nvidia-smi --query-gpu=uuid,name --format=csv
 SMALL_GPU_ID=GPU-...
 
 # Single-GPU Windows only (both optional; defaults shown)
 # GPU_ID=0            # CUDA device index
 # CONTEXT_LENGTH=32768
+
+# think-router tuning (optional; defaults shown — apply on all platforms)
+# CLASSIFIER_MODEL=granite4.1:3b       # model that classifies thinking need
+# CLASSIFIER_TIMEOUT_S=8               # fall back to thinking-on if classifier is slower than this
+# RAG_THINK_MIN_CONTEXT_CHARS=6000     # <context> larger than this forces thinking on; smaller is classified normally
+# ROUTER_DEBUG_DECISIONS=1             # log per-request routing/thinking decisions
+# EXCLUDE_MODELS=                      # comma-separated: never classify these (force thinking off)
+# INCLUDE_MODELS=                      # comma-separated: always classify these even if not reporting 'thinking'
 ```
 
 ### 2. Platform-specific setup

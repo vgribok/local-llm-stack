@@ -1,10 +1,16 @@
-Adaptive thinking router for Ollama that auto-classifies prompts and toggles extended thinking on/off — no more manual /think switching
+Open-sourced a local AI stack that makes self-hosted models faster to respond, smarter about mismatched dual-GPU rigs, and trivial to tune — all behind a drop-in Ollama-compatible proxy.
 
-**TL;DR:** Open-sourced a local AI stack with a proxy that sits in front of Ollama and automatically decides whether your prompt needs extended thinking. Complex reasoning → thinking on. Simple questions → thinking off. Adds ~50-200ms latency but saves you from either always-on thinking (slow for everything) or always-off (no deep reasoning when you need it).
+**TL;DR:** A ChatGPT-style local stack (Open WebUI + Ollama) fronted by **think-router**, a proxy that speaks the Ollama API and adds three things any Ollama client gets for free:
+
+1. **Adaptive thinking** — auto-decides whether a prompt needs extended thinking. Complex reasoning → thinking on; simple/factual questions → thinking off. No more manual `/think` toggling, and no more waiting 10–30s for "what's the syntax for X?"
+2. **Smarter mismatched dual-GPU routing** — pins one Ollama per card and deterministically places each model, so your big model stays whole on the big card instead of getting split across the PCIe bus (which tanks inference on consumer GPUs with no NVLink).
+3. **Everything tunable via Docker + env vars** — context size, GPU pinning, classifier model, web search — all text config, so a coding agent can tune the stack for you.
+
+It's a drop-in Ollama replacement: point any Ollama client (Open WebUI, Cline, Continue.dev, `curl`) at it instead of Ollama — no plugin, no code changes.
 
 ---
 
-## The Problem
+## The problem: the thinking dilemma
 
 If you're running thinking-capable models (Qwen3, DeepSeek-R1, etc.), you've probably noticed the dilemma:
 
@@ -21,9 +27,11 @@ A FastAPI proxy that intercepts Ollama API calls and uses a tiny classifier mode
 | HIGH | Complex reasoning, non-trivial code, architecture, planning | ✅ ON |
 | LOW | Simple-to-moderate code, short explanations | ❌ OFF |
 | NO | Factual lookups, definitions, conversational | ❌ OFF |
-| RAG | `<context>` tag detected (document synthesis) | ✅ ON |
+| RAG | *Large* `<context>` block detected (document synthesis) | ✅ ON |
 
 The classifier prompt is dead simple — it just asks the model to reply with NO, LOW, or HIGH based on how much "deliberation" the request needs.
+
+The RAG rule has a size gate: only a large injected `<context>` block (real document synthesis) forces thinking on. Small blocks — like the web-search snippets Open WebUI attaches to a factual question — get stripped before classification, so "what time is it in the Maldives?" stays a fast NO instead of triggering 15s of reasoning about a one-line answer.
 
 **Manual overrides still work:** Prefix any message with `/think` or `/no_think` to bypass classification.
 
@@ -53,7 +61,7 @@ The whole stack rebuilds on `./ollama.ps1 start`, so experimentation is fast: ch
 
 ## Why two Ollama instances on dual-GPU?
 
-Consumer GPUs don't have NVLink. If you let Ollama see both GPUs, it'll split large models across them — and inference tanks because of PCIe bandwidth. Pinning each instance to one GPU keeps models whole.
+Consumer NVidia GPUs don't have NVLink. If you let Ollama see both GPUs, it'll split large models across them — and inference tanks because of PCIe bandwidth limits. Pinning each instance to one GPU keeps models whole.
 
 ## The brevity trick
 
@@ -98,7 +106,7 @@ The agent gets adaptive thinking for free — no plugin needed.
 
 **GitHub:** https://github.com/vgribok/local-llm-stack
 
-The router is ~400 lines of Python: [think-router/app.py](https://github.com/vgribok/local-llm-stack/blob/main/think-router/app.py)
+The router is ~500 lines of Python: [think-router/app.py](https://github.com/vgribok/local-llm-stack/blob/main/think-router/app.py)
 
 ---
 
