@@ -39,6 +39,13 @@ CLASSIFIER_URL     = os.environ.get("CLASSIFIER_URL",     "http://ollama-small:1
 CLASSIFIER_MODEL   = os.environ.get("CLASSIFIER_MODEL",   "granite4.1:3b")
 CLASSIFIER_TIMEOUT_S = float(os.environ.get("CLASSIFIER_TIMEOUT_S", "8"))
 
+# Context window for the classifier request. Without it, Ollama applies its
+# server default — chosen from available VRAM, so up to 131072 on a large host —
+# and allocates an f16 KV cache to match. That made granite4.1:3b sit at 13GB
+# resident for a ~600-token prompt. The prompt is a 2000-char snippet plus the
+# template, so 4096 leaves ample headroom.
+CLASSIFIER_NUM_CTX = int(os.environ.get("CLASSIFIER_NUM_CTX", "4096"))
+
 # When a message carries RAG/web-search context (an injected <context>...</context>
 # block), classify the *actual* question with the context stripped out — a
 # "what time is it in the Maldives" web lookup should still classify NO. Only
@@ -232,7 +239,11 @@ async def _classify(prompt: str) -> Optional[str]:
                     "model": CLASSIFIER_MODEL,
                     "prompt": CLASSIFIER_PROMPT.format(prompt=snippet),
                     "stream": False,
-                    "options": {"num_predict": 4, "temperature": 0.0},
+                    "options": {
+                        "num_predict": 4,
+                        "temperature": 0.0,
+                        "num_ctx": CLASSIFIER_NUM_CTX,
+                    },
                     "keep_alive": "24h",
                 },
             )

@@ -103,6 +103,7 @@ SMALL_GPU_ID=GPU-...
 # think-router tuning (optional; defaults shown — apply on all platforms)
 # CLASSIFIER_MODEL=granite4.1:3b       # model that classifies thinking need
 # CLASSIFIER_TIMEOUT_S=8               # fall back to thinking-on if classifier is slower than this
+# CLASSIFIER_NUM_CTX=4096              # classifier context window; caps its KV cache (Ollama would size it from VRAM)
 # RAG_THINK_MIN_CONTEXT_CHARS=6000     # <context> larger than this forces thinking on; smaller is classified normally
 # ROUTER_DEBUG_DECISIONS=1             # log per-request routing/thinking decisions
 # ROUTER_HTTP_TRACE=0                  # 1 also logs every httpx call + healthcheck access line (noisy)
