@@ -57,6 +57,13 @@ ROUTER_DEBUG_DECISIONS = os.environ.get("ROUTER_DEBUG_DECISIONS", "0").lower() i
     "1", "true", "yes", "on"
 )
 
+# Per-request transport noise: one httpx line per outbound call plus a uvicorn
+# access line per inbound call. Independent of ROUTER_DEBUG_DECISIONS, which is
+# on by default and carries the routing decisions worth reading.
+ROUTER_HTTP_TRACE = os.environ.get("ROUTER_HTTP_TRACE", "0").lower() in (
+    "1", "true", "yes", "on"
+)
+
 # Auto-discovery overrides. Both empty by default.
 # EXCLUDE_MODELS: never classify these even if they report 'thinking' capability.
 # INCLUDE_MODELS: always classify these even if they don't report 'thinking'.
@@ -72,6 +79,23 @@ _model_backend: dict[str, str] = {}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [think-router] %(message)s")
 log = logging.getLogger("think-router")
+
+# httpx logs one INFO line per outbound request. The Docker healthcheck alone
+# fires three /api/version probes every 15s (docker-compose.yml), which drowns
+# out the routing decisions. Warnings and errors still get through.
+if not ROUTER_HTTP_TRACE:
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+class _SuppressHealthAccessLog(logging.Filter):
+    """Drop uvicorn access lines for the healthcheck endpoint."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/health" not in record.getMessage()
+
+
+if not ROUTER_HTTP_TRACE:
+    logging.getLogger("uvicorn.access").addFilter(_SuppressHealthAccessLog())
 
 CLASSIFIER_PROMPT = """Reply with exactly one word: NO, LOW, or HIGH.
 How much deliberation does the user's request below require?
@@ -398,8 +422,16 @@ async def health():
             k: ("big" if v == UPSTREAM_URL else "small")
             for k, v in _model_backend.items()
         }
+        ok = up.status_code == 200 and sm.status_code == 200 and cl.status_code == 200
+        if not ok:
+            # A reachable-but-unhealthy backend returns HTTP 200 here with ok=false,
+            # so log it — otherwise the only trace was the suppressed httpx line.
+            log.warning(
+                "health degraded: upstream_big=%s upstream_small=%s classifier=%s",
+                up.status_code, sm.status_code, cl.status_code,
+            )
         return {
-            "ok": up.status_code == 200 and sm.status_code == 200 and cl.status_code == 200,
+            "ok": ok,
             "upstream_big": up.status_code,
             "upstream_small": sm.status_code,
             "classifier": cl.status_code,

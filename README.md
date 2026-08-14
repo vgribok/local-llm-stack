@@ -105,8 +105,12 @@ SMALL_GPU_ID=GPU-...
 # CLASSIFIER_TIMEOUT_S=8               # fall back to thinking-on if classifier is slower than this
 # RAG_THINK_MIN_CONTEXT_CHARS=6000     # <context> larger than this forces thinking on; smaller is classified normally
 # ROUTER_DEBUG_DECISIONS=1             # log per-request routing/thinking decisions
+# ROUTER_HTTP_TRACE=0                  # 1 also logs every httpx call + healthcheck access line (noisy)
 # EXCLUDE_MODELS=                      # comma-separated: never classify these (force thinking off)
 # INCLUDE_MODELS=                      # comma-separated: always classify these even if not reporting 'thinking'
+
+# Open WebUI logging (optional; default shown)
+# GLOBAL_LOG_LEVEL=WARNING             # INFO restores uvicorn access logs + RAG retrieval dumps
 ```
 
 ### 2. Platform-specific setup

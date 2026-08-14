@@ -25,6 +25,8 @@ services:
       - EXCLUDE_MODELS=
       - INCLUDE_MODELS=
       - ROUTER_DEBUG_DECISIONS=${ROUTER_DEBUG_DECISIONS:-1}
+      # 1 = also log every outbound httpx call and the /health access lines.
+      - ROUTER_HTTP_TRACE=${ROUTER_HTTP_TRACE:-0}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:11434/health',timeout=3).status==200 else 1)\""]
       interval: 15s
@@ -43,6 +45,11 @@ services:
       - ./open-webui:/app/backend/data
       - ./patches/tavily.py:/app/backend/open_webui/retrieval/web/tavily.py:ro
     environment:
+      # Quiets the uvicorn access log (the browser polls /_app/version.json every
+      # 60s) and the RAG retrieval dumps. Also the only log knob OWUI 0.9.x has:
+      # SRC_LOG_LEVELS is legacy, so per-module *_LOG_LEVEL vars no longer apply.
+      # Set to INFO in .env when troubleshooting.
+      - GLOBAL_LOG_LEVEL=${GLOBAL_LOG_LEVEL:-WARNING}
       # All model traffic goes through think-router
       - OLLAMA_BASE_URLS=http://think-router:11434
       # Web search via Tavily
