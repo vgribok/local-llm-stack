@@ -177,7 +177,9 @@ if ($Platform -eq "pc") {
             $GpuCount = @($gpuLines | Where-Object { $_.Trim() -ne "" }).Count
         }
     }
-    catch { }
+    catch {
+        Write-Verbose "NVIDIA GPU detection failed; continuing with zero detected GPUs: $($_.Exception.Message)"
+    }
 }
 
 # Check for bare-metal Ollama on the host (PC only; skipped for dual-GPU for speed)
@@ -187,7 +189,9 @@ if ($Platform -eq "pc" -and $GpuCount -lt 2) {
         $null = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 2
         $OllamaRunning = $true
     }
-    catch { }
+    catch {
+        Write-Verbose "Bare-metal Ollama probe failed at http://localhost:11434: $($_.Exception.Message)"
+    }
 }
 
 $bareMetalConfig = @{
@@ -290,6 +294,7 @@ function Get-ModelSizeGB([string]$name) {
         return [math]::Round($bytes / 1GB, 2)
     }
     catch {
+        Write-Verbose "Registry size lookup failed for '$name': $($_.Exception.Message)"
         return $null
     }
 }
@@ -336,6 +341,7 @@ function Get-OllamaModels([string]$BackendKey) {
         return $r.models
     }
     catch {
+        Write-Verbose "Model-list probe failed for backend '$BackendKey' at ${url}: $($_.Exception.Message)"
         return @()
     }
 }
@@ -435,14 +441,18 @@ function Get-EndpointProbe([string]$BaseUrl) {
         try {
             $version = (ConvertFrom-Json $versionResp.Content).version
         }
-        catch { }
+        catch {
+            Write-Verbose "Endpoint version response from '$versionUrl' was not valid JSON: $($_.Exception.Message)"
+        }
 
         $modelCount = $null
         try {
             $tags = Invoke-RestMethod -Uri $tagsUrl -TimeoutSec 2
             $modelCount = @($tags.models).Count
         }
-        catch { }
+        catch {
+            Write-Verbose "Endpoint model-list probe failed at '$tagsUrl': $($_.Exception.Message)"
+        }
 
         return [pscustomobject]@{
             BaseUrl    = $BaseUrl
@@ -541,14 +551,18 @@ function Get-DiagnosticPorts {
     try {
         $ports += ([uri]$Config.ThinkRouterUrl).Port
     }
-    catch { }
+    catch {
+        Write-Verbose "Could not parse think-router diagnostic URL '$($Config.ThinkRouterUrl)': $($_.Exception.Message)"
+    }
 
     foreach ($backend in $Config.Backends.Values) {
         if (-not $backend.url) { continue }
         try {
             $ports += ([uri]$backend.url).Port
         }
-        catch { }
+        catch {
+            Write-Verbose "Could not parse backend diagnostic URL '$($backend.url)': $($_.Exception.Message)"
+        }
     }
 
     return @($ports | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
@@ -628,6 +642,7 @@ function Get-DockerServerPlatform {
         }
     }
     catch {
+        Write-Verbose "Docker server platform detection failed: $($_.Exception.Message)"
         return $null
     }
 }
@@ -671,6 +686,7 @@ function Get-LocalImageDigest {
         return (($match -split "@", 2)[1])
     }
     catch {
+        Write-Verbose "Local image digest lookup failed for '$ImageRef': $($_.Exception.Message)"
         return $null
     }
 }
@@ -726,6 +742,7 @@ function Get-RemoteImageDigest {
         return $null
     }
     catch {
+        Write-Verbose "Remote image digest lookup failed for '$PinnedRef': $($_.Exception.Message)"
         return $null
     }
 }
@@ -781,6 +798,7 @@ function Invoke-ImageFreshnessDiagnostics {
             }
         }
         catch {
+            Write-Verbose "Pinned image inspection failed for '$($img.PinnedRef)': $($_.Exception.Message)"
             $localDigest = $null
         }
 
