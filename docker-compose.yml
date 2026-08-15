@@ -22,6 +22,7 @@ services:
       # Caps the classifier's KV cache. Unset, Ollama sizes the context from
       # available VRAM (up to 131072) for what is a ~600-token prompt.
       - CLASSIFIER_NUM_CTX=${CLASSIFIER_NUM_CTX:-4096}
+      - MODEL_REGISTRY_TTL_S=${MODEL_REGISTRY_TTL_S:-15}
       # Min size of an injected <context> block that forces thinking on (document
       # synthesis). Smaller blocks (e.g. web-search snippets) are classified normally.
       - RAG_THINK_MIN_CONTEXT_CHARS=${RAG_THINK_MIN_CONTEXT_CHARS:-6000}

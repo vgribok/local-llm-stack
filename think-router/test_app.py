@@ -223,6 +223,7 @@ def _tags_response(names, backend_label):
 class TestModelRegistry(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         app_mod._model_backend.clear()
+        app_mod._registry_refreshed_at = 0.0
 
     async def test_refresh_populates_registry(self):
         big_resp   = _tags_response(["qwen3.6:27b", "llama3:70b"], "big")
@@ -249,6 +250,7 @@ class TestModelRegistry(unittest.IsolatedAsyncioTestCase):
 
     async def test_backend_for_model_cache_hit(self):
         app_mod._model_backend["qwen3.6:27b"] = BIG
+        app_mod._registry_refreshed_at = __import__("time").monotonic()
         result = await app_mod._backend_for_model("qwen3.6:27b")
         self.assertEqual(result, BIG)
 
@@ -273,14 +275,58 @@ class TestModelRegistry(unittest.IsolatedAsyncioTestCase):
 
     async def test_small_model_routes_to_small(self):
         app_mod._model_backend["nomic-embed-text"] = SMALL
+        app_mod._registry_refreshed_at = __import__("time").monotonic()
         result = await app_mod._backend_for_model("nomic-embed-text")
         self.assertEqual(result, SMALL)
+
+    async def test_duplicate_model_keeps_big_backend(self):
+        duplicate = "gemma4:12b"
+        big_resp = _tags_response([duplicate], "big")
+        small_resp = _tags_response([duplicate], "small")
+
+        async def fake_get(url, **kwargs):
+            return big_resp if "big" in url else small_resp
+
+        with patch("httpx.AsyncClient") as MockClient:
+            inst = AsyncMock()
+            inst.__aenter__ = AsyncMock(return_value=inst)
+            inst.__aexit__ = AsyncMock(return_value=False)
+            inst.get = fake_get
+            MockClient.return_value = inst
+            await app_mod._refresh_model_registry()
+
+        self.assertEqual(app_mod._model_backend[duplicate], BIG)
+
+    async def test_stale_cached_route_is_refreshed(self):
+        model = "gemma4:12b"
+        app_mod._model_backend[model] = SMALL
+        app_mod._registry_refreshed_at = (
+            __import__("time").monotonic() - app_mod.MODEL_REGISTRY_TTL_S - 1
+        )
+        big_resp = _tags_response([model], "big")
+        small_resp = _tags_response([], "small")
+
+        async def fake_get(url, **kwargs):
+            return big_resp if "big" in url else small_resp
+
+        with patch("httpx.AsyncClient") as MockClient:
+            inst = AsyncMock()
+            inst.__aenter__ = AsyncMock(return_value=inst)
+            inst.__aexit__ = AsyncMock(return_value=False)
+            inst.get = fake_get
+            MockClient.return_value = inst
+            result = await app_mod._backend_for_model(model)
+
+        self.assertEqual(result, BIG)
 
 
 # ---------------------------------------------------------------------------
 # Chat routing: thinking classification skipped for small-GPU models
 # ---------------------------------------------------------------------------
 class TestChatRoutingSkipsThinkingForSmallModels(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        app_mod._registry_refreshed_at = __import__("time").monotonic()
+
     async def test_small_model_bypasses_maybe_set_think(self):
         """
         When a model resolves to the small backend, _maybe_set_think must NOT
@@ -348,6 +394,7 @@ class TestChatRoutingSkipsThinkingForSmallModels(unittest.IsolatedAsyncioTestCas
 class TestPassthroughRouting(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         app_mod._model_backend.clear()
+        app_mod._registry_refreshed_at = __import__("time").monotonic()
 
     async def test_model_bearing_request_routes_to_small(self):
         app_mod._model_backend["nomic-embed-text"] = SMALL

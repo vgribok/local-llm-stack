@@ -20,6 +20,7 @@ All other endpoints fall through to ollama-big (management operations).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -38,6 +39,7 @@ SMALL_UPSTREAM_URL = os.environ.get("SMALL_UPSTREAM_URL", "http://ollama-small:1
 CLASSIFIER_URL     = os.environ.get("CLASSIFIER_URL",     "http://ollama-small:11434")
 CLASSIFIER_MODEL   = os.environ.get("CLASSIFIER_MODEL",   "granite4.1:3b")
 CLASSIFIER_TIMEOUT_S = float(os.environ.get("CLASSIFIER_TIMEOUT_S", "8"))
+MODEL_REGISTRY_TTL_S = float(os.environ.get("MODEL_REGISTRY_TTL_S", "15"))
 
 # Context window for the classifier request. Without it, Ollama applies its
 # server default — chosen from available VRAM, so up to 131072 on a large host —
@@ -83,6 +85,8 @@ _thinking_cache: dict[str, bool] = {}
 # model_name -> backend URL. Populated from /api/tags on both backends at startup
 # and refreshed on cache miss (handles models pulled after startup).
 _model_backend: dict[str, str] = {}
+_registry_refreshed_at = 0.0
+_registry_refresh_lock = asyncio.Lock()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [think-router] %(message)s")
 log = logging.getLogger("think-router")
@@ -116,39 +120,62 @@ HIGH — complex reasoning, non-trivial algorithms or code, planning, architectu
 Answer (NO, LOW, or HIGH):"""
 
 
-async def _refresh_model_registry() -> None:
+async def _refresh_model_registry(*, force: bool = False) -> None:
     """Query /api/tags on both backends and rebuild the model→backend map."""
-    updated: dict[str, str] = {}
-    for backend_url in (UPSTREAM_URL, SMALL_UPSTREAM_URL):
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(f"{backend_url}/api/tags")
-                r.raise_for_status()
-                for m in r.json().get("models") or []:
-                    name = m.get("name")
-                    if name:
+    global _registry_refreshed_at
+
+    now = time.monotonic()
+    if not force and now - _registry_refreshed_at < MODEL_REGISTRY_TTL_S:
+        return
+
+    async with _registry_refresh_lock:
+        now = time.monotonic()
+        if not force and now - _registry_refreshed_at < MODEL_REGISTRY_TTL_S:
+            return
+
+        updated: dict[str, str] = {}
+        backend_urls = list(dict.fromkeys((UPSTREAM_URL, SMALL_UPSTREAM_URL)))
+        for backend_url in backend_urls:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    r = await client.get(f"{backend_url}/api/tags")
+                    r.raise_for_status()
+                    for m in r.json().get("models") or []:
+                        name = m.get("name")
+                        if not name:
+                            continue
+                        existing = updated.get(name)
+                        if existing and existing != backend_url:
+                            log.warning(
+                                "model registry duplicate model=%s keeping=%s ignoring=%s",
+                                name,
+                                existing,
+                                backend_url,
+                            )
+                            continue
                         updated[name] = backend_url
-        except Exception as e:
-            log.warning("model registry refresh failed for %s: %s", backend_url, e)
-    if updated:
-        _model_backend.clear()
-        _model_backend.update(updated)
-        big = sum(1 for v in updated.values() if v == UPSTREAM_URL)
-        small = sum(1 for v in updated.values() if v == SMALL_UPSTREAM_URL)
-        log.info("model registry: %d total (%d big, %d small)", len(updated), big, small)
+            except Exception as e:
+                log.warning("model registry refresh failed for %s: %s", backend_url, e)
+
+        if updated or not _model_backend:
+            _model_backend.clear()
+            _model_backend.update(updated)
+        _registry_refreshed_at = time.monotonic()
+
+        big = sum(1 for v in _model_backend.values() if v == UPSTREAM_URL)
+        small = sum(1 for v in _model_backend.values() if v == SMALL_UPSTREAM_URL and v != UPSTREAM_URL)
+        log.info("model registry: %d total (%d big, %d small)", len(_model_backend), big, small)
 
 
 async def _backend_for_model(model: str) -> str:
-    """Return the backend URL that owns this model. Refreshes once on cache miss."""
-    if model in _model_backend:
-        return _model_backend[model]
+    """Return the backend URL that owns this model, refreshing stale entries."""
     await _refresh_model_registry()
     return _model_backend.get(model, UPSTREAM_URL)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await _refresh_model_registry()
+    await _refresh_model_registry(force=True)
     yield
 
 
