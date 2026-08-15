@@ -54,7 +54,7 @@ $CommandDescriptions = [ordered]@{
     version = "Show Ollama version per backend."
     start   = "Start stack with selected compose files and diagnostics."
     up      = "Alias for start."
-    diag    = "Run loopback/native-conflict diagnostics + image freshness checks."
+    diag    = "Run loopback/native-conflict diagnostics."
     help    = "Show this help with command reference."
 }
 
@@ -105,7 +105,7 @@ function Show-WrapperHelp {
     Write-Host "    ./ollama.ps1 start"
     Write-Host "    ./ollama.ps1 list"
     Write-Host "    ./ollama.ps1 pull qwen3.6:27b"
-    Write-Host "    ./ollama.ps1 diag   # includes Docker image update warnings"
+    Write-Host "    ./ollama.ps1 diag   # loopback/native-conflict diagnostics"
     Write-Host ""
 }
 
@@ -705,25 +705,47 @@ function Invoke-ImageFreshnessDiagnostics {
     }
 
     $imageTargets = @()
-    $imageTargets += [pscustomobject]@{ Label = "Ollama"; Repository = "ollama/ollama"; Tag = "latest" }
-    $imageTargets += [pscustomobject]@{ Label = "Open WebUI"; Repository = "ghcr.io/open-webui/open-webui"; Tag = "latest" }
+    $imageTargets += [pscustomobject]@{
+        Label          = "Ollama"
+        Repository     = "ollama/ollama"
+        PinnedRef      = "ollama/ollama@sha256:10c13eb515db310990527d36ca14a136da4bcc0fbf2bf3b15e9c1f111e9d3cd4"
+        ExpectedDigest = "sha256:10c13eb515db310990527d36ca14a136da4bcc0fbf2bf3b15e9c1f111e9d3cd4"
+    }
+    $imageTargets += [pscustomobject]@{
+        Label          = "Open WebUI"
+        Repository     = "ghcr.io/open-webui/open-webui"
+        PinnedRef      = "ghcr.io/open-webui/open-webui@sha256:a26effeb220e132482bf7e0560b3404843e7bc40d23051144e062960df8df6b0"
+        ExpectedDigest = "sha256:a26effeb220e132482bf7e0560b3404843e7bc40d23051144e062960df8df6b0"
+    }
 
     foreach ($img in $imageTargets) {
-        $localDigest = Get-LocalImageDigest -Repository $img.Repository -Tag $img.Tag
+        $localDigest = $null
+        try {
+            $repoDigestsJson = (& docker image inspect --format "{{json .RepoDigests}}" $img.PinnedRef 2>$null)
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($repoDigestsJson)) {
+                $repoDigests = @($repoDigestsJson | ConvertFrom-Json)
+                $match = $repoDigests | Where-Object { $_ -like "$($img.Repository)@*" } | Select-Object -First 1
+                if (-not $match) {
+                    $match = $repoDigests | Select-Object -First 1
+                }
+                if ($match -like "*@*") {
+                    $localDigest = (($match -split "@", 2)[1])
+                }
+            }
+        }
+        catch {
+            $localDigest = $null
+        }
+
         if (-not $localDigest) {
-            Write-Host "Image diagnostics: $($img.Label) ($($img.Repository):$($img.Tag)) is not pulled locally; skipping freshness check." -ForegroundColor DarkGray
+            Write-Warning "Image diagnostics: pinned $($img.Label) image is not pulled locally ($($img.PinnedRef))."
+            Write-Host "Pull pinned image: docker pull $($img.PinnedRef)" -ForegroundColor Yellow
             continue
         }
 
-        $remoteDigest = Get-RemoteImageDigest -Repository $img.Repository -Tag $img.Tag -PlatformOs $platform.Os -PlatformArch $platform.Arch
-        if (-not $remoteDigest) {
-            Write-Warning "Image diagnostics: could not resolve remote digest for $($img.Repository):$($img.Tag)."
-            continue
-        }
-
-        if ($localDigest -ne $remoteDigest) {
-            Write-Warning "$($img.Label) image is out of date: local digest $localDigest != remote digest $remoteDigest"
-            Write-Host "Update with: docker pull $($img.Repository):$($img.Tag)" -ForegroundColor Yellow
+        if ($localDigest -ne $img.ExpectedDigest) {
+            Write-Warning "$($img.Label) image digest differs from pinned version: local $localDigest != expected $($img.ExpectedDigest)"
+            Write-Host "Update with pinned image: docker pull $($img.PinnedRef)" -ForegroundColor Yellow
 
             $serviceRefreshHint = switch ($img.Label) {
                 "Ollama" {
@@ -745,7 +767,7 @@ function Invoke-ImageFreshnessDiagnostics {
             Write-Host "Fallback/full refresh: ./ollama.ps1 start" -ForegroundColor Yellow
         }
         else {
-            Write-Host "Image diagnostics: $($img.Label) image is up to date ($localDigest)." -ForegroundColor DarkGray
+            Write-Host "Image diagnostics: $($img.Label) image matches pinned digest ($localDigest)." -ForegroundColor DarkGray
         }
     }
 }
@@ -755,9 +777,7 @@ function Invoke-SharedDiagnostics {
     .SYNOPSIS
         Shared diagnostics for both `diag` and `start`.
     #>
-    param(
-        [switch]$SkipImageFreshness
-    )
+    param()
 
     $portsToCheck = Get-DiagnosticPorts
     $routerPort = ([uri]$Config.ThinkRouterUrl).Port
@@ -765,9 +785,6 @@ function Invoke-SharedDiagnostics {
     Invoke-LoopbackDiagnostics -Ports $portsToCheck
     Test-NativeOllamaConflictOnPort -Port $routerPort | Out-Null
 
-    if (-not $SkipImageFreshness) {
-        Invoke-ImageFreshnessDiagnostics
-    }
 }
 
 function Start-Stack {
@@ -791,7 +808,7 @@ function Start-Stack {
     }
 
     Write-Host "Running post-start loopback diagnostics..." -ForegroundColor DarkGray
-    Invoke-SharedDiagnostics -SkipImageFreshness
+    Invoke-SharedDiagnostics
 
     Write-Host "All containers healthy. Opening $($Config.WebUiUrl) ..." -ForegroundColor Green
 
