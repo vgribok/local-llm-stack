@@ -202,6 +202,7 @@ The agent gets model-aware routing, adaptive thinking classification, and the co
 | `docker-compose.pc-dual.yml` | Windows overlay: dual NVIDIA GPU, ollama-big + ollama-small |
 | `docker-compose.pc-single.yml` | Windows overlay: single NVIDIA GPU, one ollama-big |
 | `docker-compose.bare-metal.yml` | Bare-metal overlay: connects to host Ollama (any OS, any GPU) |
+| `image-pins.env` | Single source of truth for pinned Ollama and Open WebUI images |
 | `ollama.ps1` | Cross-platform wrapper for Ollama operations |
 | `think-router/app.py` | Unified Ollama gateway — model registry, routing, thinking proxy |
 | `think-router/test_app.py` | Unit tests for routing logic |

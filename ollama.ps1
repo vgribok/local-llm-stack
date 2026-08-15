@@ -41,6 +41,35 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$ImagePinsPath = Join-Path $PSScriptRoot "image-pins.env"
+if (-not (Test-Path -LiteralPath $ImagePinsPath)) {
+    throw "Image pins file not found: $ImagePinsPath"
+}
+
+$ImagePins = @{}
+foreach ($line in Get-Content -LiteralPath $ImagePinsPath) {
+    $trimmedLine = $line.Trim()
+    if ($trimmedLine -eq "" -or $trimmedLine.StartsWith("#")) {
+        continue
+    }
+
+    $name, $value = $trimmedLine -split "=", 2
+    if ($name -and $value) {
+        $ImagePins[$name.Trim()] = $value.Trim()
+    }
+}
+
+foreach ($name in @("OLLAMA_IMAGE", "OPEN_WEBUI_IMAGE")) {
+    if ($ImagePins[$name] -notmatch "^[^@\s]+@sha256:[a-f0-9]{64}$") {
+        throw "Missing or invalid $name in $ImagePinsPath"
+    }
+}
+
+$OllamaImageRef = $ImagePins["OLLAMA_IMAGE"]
+$OpenWebUIImageRef = $ImagePins["OPEN_WEBUI_IMAGE"]
+$OllamaImageDigest = ($OllamaImageRef -split "@", 2)[1]
+$OpenWebUIImageDigest = ($OpenWebUIImageRef -split "@", 2)[1]
+
 $ValidCommands = @("pull", "list", "ps", "rm", "stop", "show", "run", "size", "version", "start", "up", "diag", "help")
 $CommandDescriptions = [ordered]@{
     pull    = "Pull a model (auto-routed to backend when applicable)."
@@ -454,7 +483,7 @@ function Test-LoopbackPortConflict([int]$Port) {
 
         Write-Host "Remediation (cross-platform):" -ForegroundColor Yellow
         Write-Host "  1) Point all clients to a single canonical URL (recommended: http://localhost:$Port)."
-        Write-Host "  2) Stop whichever duplicate Ollama/Router service is unintentionally bound on the same port."
+        Write-Host "  2) !!! STOP whichever duplicate/NATIVE Ollama/Router service is unintentionally bound on the same port." !!!
         Write-Host "  3) If using CLI, set OLLAMA_HOST explicitly to that canonical URL."
         return $true
     }
@@ -708,14 +737,14 @@ function Invoke-ImageFreshnessDiagnostics {
     $imageTargets += [pscustomobject]@{
         Label          = "Ollama"
         Repository     = "ollama/ollama"
-        PinnedRef      = "ollama/ollama@sha256:10c13eb515db310990527d36ca14a136da4bcc0fbf2bf3b15e9c1f111e9d3cd4"
-        ExpectedDigest = "sha256:10c13eb515db310990527d36ca14a136da4bcc0fbf2bf3b15e9c1f111e9d3cd4"
+        PinnedRef      = $OllamaImageRef
+        ExpectedDigest = $OllamaImageDigest
     }
     $imageTargets += [pscustomobject]@{
         Label          = "Open WebUI"
         Repository     = "ghcr.io/open-webui/open-webui"
-        PinnedRef      = "ghcr.io/open-webui/open-webui@sha256:a26effeb220e132482bf7e0560b3404843e7bc40d23051144e062960df8df6b0"
-        ExpectedDigest = "sha256:a26effeb220e132482bf7e0560b3404843e7bc40d23051144e062960df8df6b0"
+        PinnedRef      = $OpenWebUIImageRef
+        ExpectedDigest = $OpenWebUIImageDigest
     }
 
     foreach ($img in $imageTargets) {
@@ -796,6 +825,12 @@ function Start-Stack {
     Invoke-SharedDiagnostics
 
     $composeArgs = @()
+    $localEnvPath = Join-Path $PSScriptRoot ".env"
+    if (Test-Path -LiteralPath $localEnvPath) {
+        $composeArgs += @("--env-file", $localEnvPath)
+    }
+    $composeArgs += @("--env-file", $ImagePinsPath)
+
     foreach ($f in $Config.ComposeFiles) {
         $composeArgs += @("-f", (Join-Path $PSScriptRoot $f))
     }

@@ -231,6 +231,7 @@ async def _classify(prompt: str) -> Optional[str]:
     if not prompt:
         return "NO"
     snippet = prompt[:2000]
+    started = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=CLASSIFIER_TIMEOUT_S) as client:
             r = await client.post(
@@ -255,7 +256,15 @@ async def _classify(prompt: str) -> Optional[str]:
                 return "LOW"
             return "NO"
     except Exception as e:
-        log.warning("classifier failed: %s", e)
+        log.warning(
+            "classifier failed type=%s detail=%r model=%s url=%s timeout_s=%s elapsed_ms=%.1f",
+            type(e).__name__,
+            e,
+            CLASSIFIER_MODEL,
+            CLASSIFIER_URL,
+            CLASSIFIER_TIMEOUT_S,
+            (time.perf_counter() - started) * 1000,
+        )
         return None
 
 

@@ -1,10 +1,10 @@
 # Windows/PC overlay: dual-GPU Ollama backends (NVIDIA CUDA)
-# Usage: docker compose -f docker-compose.yml -f docker-compose.pc-dual.yml up -d
+# Usage: docker compose --env-file .env --env-file image-pins.env -f docker-compose.yml -f docker-compose.pc-dual.yml up -d
 
 services:
 
   ollama-big:
-    image: ollama/ollama@sha256:10c13eb515db310990527d36ca14a136da4bcc0fbf2bf3b15e9c1f111e9d3cd4
+    image: ${OLLAMA_IMAGE:?Set OLLAMA_IMAGE via image-pins.env}
     restart: unless-stopped
     networks:
       - ai-net
@@ -41,7 +41,7 @@ services:
               capabilities: [gpu]
 
   ollama-small:
-    image: ollama/ollama@sha256:10c13eb515db310990527d36ca14a136da4bcc0fbf2bf3b15e9c1f111e9d3cd4
+    image: ${OLLAMA_IMAGE:?Set OLLAMA_IMAGE via image-pins.env}
     restart: unless-stopped
     networks:
       - ai-net

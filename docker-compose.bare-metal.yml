@@ -1,5 +1,5 @@
 # Bare-metal Ollama overlay: Ollama running on host (any OS, any GPU vendor)
-# Usage: docker compose -f docker-compose.yml -f docker-compose.bare-metal.yml up -d
+# Usage: docker compose --env-file .env -f docker-compose.yml -f docker-compose.bare-metal.yml up -d
 #
 # Prerequisites:
 #   - Ollama running on host at localhost:11434
