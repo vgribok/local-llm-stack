@@ -12,7 +12,7 @@ services:
       - "3003:11434"
     volumes:
       # Private model store - prevents OWUI from routing small models here
-      - C:/Users/vgrib/.ollama-big:/root/.ollama
+      - ollama-big-models:/root/.ollama
     environment:
       # Pin to RTX 3090 Ti. Docker Desktop on Windows ignores NVIDIA_VISIBLE_DEVICES
       # filtering, so we restrict at the CUDA library level instead.
@@ -49,7 +49,7 @@ services:
       - "3004:11434"
     volumes:
       # Private model store - only contains task/embedding models
-      - C:/Users/vgrib/.ollama-small:/root/.ollama
+      - ollama-small-models:/root/.ollama
     environment:
       # Pin to RTX 5060 Ti. Docker Desktop on Windows ignores NVIDIA_VISIBLE_DEVICES
       # filtering, so we restrict at the CUDA library level instead.
@@ -98,3 +98,11 @@ services:
 
 networks:
   ai-net:
+
+volumes:
+  ollama-big-models:
+    name: ai-stack-ollama-big-models
+    external: true
+  ollama-small-models:
+    name: ai-stack-ollama-small-models
+    external: true

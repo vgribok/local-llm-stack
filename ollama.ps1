@@ -24,6 +24,7 @@
     ./ollama.ps1 start                    # docker compose up, wait healthy, open OWUI
     ./ollama.ps1 up                       # synonym for 'start'
     ./ollama.ps1 restart                  # stop, then start the Docker Compose stack
+    ./ollama.ps1 migrate-storage          # move legacy Windows bind-mounted models to Docker volumes
 #>
 
 [CmdletBinding()]
@@ -72,7 +73,7 @@ $OpenWebUIImageRef = $ImagePins["OPEN_WEBUI_IMAGE"]
 $OllamaImageDigest = ($OllamaImageRef -split "@", 2)[1]
 $OpenWebUIImageDigest = ($OpenWebUIImageRef -split "@", 2)[1]
 
-$ValidCommands = @("pull", "list", "ps", "rm", "stop", "show", "run", "size", "version", "start", "up", "restart", "diag", "help")
+$ValidCommands = @("pull", "list", "ps", "rm", "stop", "show", "run", "size", "version", "start", "up", "restart", "migrate-storage", "diag", "help")
 $CommandDescriptions = [ordered]@{
     pull    = "Pull a model (auto-routed to backend when applicable)."
     list    = "List installed models across backend(s)."
@@ -86,6 +87,7 @@ $CommandDescriptions = [ordered]@{
     start   = "Start stack with selected compose files and diagnostics."
     up      = "Alias for start."
     restart = "Stop, then start the Docker Compose stack."
+    "migrate-storage" = "Copy legacy Windows model stores into faster Docker named volumes."
     diag    = "Run loopback/native-conflict diagnostics."
     help    = "Show this help with command reference."
 }
@@ -137,6 +139,7 @@ function Show-WrapperHelp {
     Write-Host "    ./ollama.ps1 start"
     Write-Host "    ./ollama.ps1 stop"
     Write-Host "    ./ollama.ps1 restart"
+    Write-Host "    ./ollama.ps1 migrate-storage"
     Write-Host "    ./ollama.ps1 list"
     Write-Host "    ./ollama.ps1 pull qwen3.6:27b"
     Write-Host "    ./ollama.ps1 diag   # loopback/native-conflict diagnostics"
@@ -196,7 +199,10 @@ $bareMetalConfig = @{
     }
     BackendOrder   = @("default")
     UsesDocker     = $false
+    ModelStores    = @()
 }
+
+$UserProfilePath = [Environment]::GetFolderPath("UserProfile")
 
 $pcSingleConfig = @{
     ComposeFiles   = @("docker-compose.yml", "docker-compose.pc-single.yml")
@@ -207,6 +213,9 @@ $pcSingleConfig = @{
     }
     BackendOrder   = @("big")
     UsesDocker     = $true
+    ModelStores    = @(
+        @{ Label = "models"; Source = (Join-Path $UserProfilePath ".ollama"); Volume = "ai-stack-ollama-models" }
+    )
 }
 
 $pcDualConfig = @{
@@ -219,6 +228,10 @@ $pcDualConfig = @{
     }
     BackendOrder   = @("big", "small")
     UsesDocker     = $true
+    ModelStores    = @(
+        @{ Label = "big"; Source = (Join-Path $UserProfilePath ".ollama-big"); Volume = "ai-stack-ollama-big-models" }
+        @{ Label = "small"; Source = (Join-Path $UserProfilePath ".ollama-small"); Volume = "ai-stack-ollama-small-models" }
+    )
 }
 
 # PC config: dual GPU wins, then bare-metal Ollama (any vendor), then single NVIDIA GPU
@@ -836,11 +849,23 @@ function Get-ComposeArguments {
     return $composeArgs
 }
 
+function Initialize-ModelVolumes {
+    if (-not $Config.UsesDocker) { return }
+
+    foreach ($store in $Config.ModelStores) {
+        & docker volume create $store.Volume | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not ensure Docker volume '$($store.Volume)' exists."
+        }
+    }
+}
+
 function Start-Stack {
     <#
     .SYNOPSIS
         Start the Docker Compose stack with platform-appropriate compose files.
     #>
+    Initialize-ModelVolumes
     Write-Host "Running preflight loopback diagnostics..." -ForegroundColor DarkGray
     Invoke-SharedDiagnostics
 
@@ -882,6 +907,61 @@ function Stop-Stack {
     }
 
     Write-Host "Docker Compose stack stopped. Persistent data was preserved." -ForegroundColor Green
+}
+
+function Move-OllamaStorageToVolumes {
+    <#
+    .SYNOPSIS
+        Copy legacy Windows bind-mounted Ollama stores into Docker named volumes.
+    #>
+    if (-not $Config.UsesDocker -or $Platform -ne "pc") {
+        throw "migrate-storage applies only to Windows Docker-hosted Ollama configurations."
+    }
+
+    Write-Host "Checking legacy stores and destination volumes..." -ForegroundColor Cyan
+    foreach ($store in $Config.ModelStores) {
+        if (-not (Test-Path -LiteralPath $store.Source -PathType Container)) {
+            throw "Legacy $($store.Label) model store not found: $($store.Source). Nothing was changed."
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $store.Source "models") -PathType Container)) {
+            throw "Legacy $($store.Label) store has no models directory: $($store.Source). Nothing was changed."
+        }
+
+        & docker volume create $store.Volume | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not create Docker volume '$($store.Volume)'. Nothing was changed."
+        }
+
+        & docker run --rm --entrypoint /bin/sh -v "$($store.Volume):/data" $OllamaImageRef -c 'test -z "$(find /data -mindepth 1 -print -quit)"'
+        if ($LASTEXITCODE -ne 0) {
+            throw "Destination volume '$($store.Volume)' is not empty. Refusing to merge data; legacy stores were not changed."
+        }
+    }
+
+    Stop-Stack
+
+    try {
+        foreach ($store in $Config.ModelStores) {
+            Write-Host "Copying $($store.Source) -> $($store.Volume)..." -ForegroundColor Cyan
+            & docker run --rm --entrypoint /bin/sh -v "$($store.Source):/source:ro" -v "$($store.Volume):/dest" $OllamaImageRef -c 'cp -a /source/. /dest/'
+            if ($LASTEXITCODE -ne 0) {
+                throw "Copy into '$($store.Volume)' failed."
+            }
+
+            & docker run --rm --entrypoint /bin/sh -v "$($store.Volume):/data:ro" $OllamaImageRef -c 'test -d /data/models && test -n "$(find /data/models -mindepth 1 -print -quit)"'
+            if ($LASTEXITCODE -ne 0) {
+                throw "Verification of '$($store.Volume)' failed."
+            }
+        }
+    }
+    catch {
+        Write-Warning "Migration stopped. The original host directories are intact. Remove any partially populated destination volume before retrying."
+        throw
+    }
+
+    Write-Host "Migration verified. Original host directories were retained as a rollback copy." -ForegroundColor Green
+    Write-Host "After verifying your models, you may delete those legacy directories manually." -ForegroundColor Yellow
+    Start-Stack
 }
 
 #endregion
@@ -1011,6 +1091,10 @@ switch ($Command) {
     "restart" {
         Stop-Stack
         Start-Stack
+    }
+
+    "migrate-storage" {
+        Move-OllamaStorageToVolumes
     }
 }
 

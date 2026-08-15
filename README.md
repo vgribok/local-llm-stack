@@ -151,6 +151,14 @@ No additional setup needed — GPU count is detected automatically.
 pwsh ./ollama.ps1 start
 ```
 
+Existing Windows Docker installations that previously stored models under `~/.ollama`, `~/.ollama-big`, or `~/.ollama-small` should migrate once before their next normal start:
+
+```powershell
+./ollama.ps1 migrate-storage
+```
+
+The command validates empty destination volumes, stops the stack, copies and verifies the model data, then restarts it. It deliberately retains the original host directories as a rollback copy.
+
 This automatically selects the correct compose files:
 - **Windows (dual NVIDIA GPU):** `docker-compose.yml` + `docker-compose.pc-dual.yml`
 - **Windows (single NVIDIA GPU):** `docker-compose.yml` + `docker-compose.pc-single.yml`
@@ -183,9 +191,9 @@ The agent gets model-aware routing, adaptive thinking classification, and the co
 
 **Why two Ollama instances on dual-GPU Windows** — A single instance with both GPUs visible will split a model that doesn't fit on one GPU across both, which slows inference dramatically (no NVLink between consumer GPUs). Two pinned instances keep each model whole on its assigned GPU.
 
-**Why separate model stores on dual-GPU Windows** — Each Ollama bind-mounts its own directory under `~/`. Sharing the store made both backends advertise the same models, and Open WebUI would route by name without regard for VRAM capacity. Separate stores enforce routing structurally.
+**Why separate named-volume model stores on dual-GPU Windows** — Each Ollama instance mounts its own Docker named volume. Sharing a store made both backends advertise the same models, and Open WebUI would route by name without regard for VRAM capacity. Separate stores enforce routing structurally, while named volumes avoid Docker Desktop's slow Windows-host filesystem path during large model loads.
 
-**Single-GPU Windows uses one container** — All models share `ollama-big`. The think-router routes everything there; the big/small distinction is inert. Models live in a shared `~/.ollama` store.
+**Single-GPU Windows uses one container** — All models share `ollama-big`. The think-router routes everything there; the big/small distinction is inert. Models live in one Docker named volume.
 
 **Bare-metal overlay works for any GPU vendor** — Docker GPU pass-through on Windows requires NVIDIA drivers; AMD (ROCm is Linux-only) and Intel Arc GPUs cannot be passed into Windows Docker containers. The bare-metal overlay sidesteps this: Ollama runs natively with full GPU access, and Docker services connect via `host.docker.internal`. On Windows, this path is also selected automatically when Ollama is already running on port 11434 before `./ollama.ps1 start` is called.
 

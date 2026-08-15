@@ -11,7 +11,7 @@ services:
     ports:
       - "3003:11434"
     volumes:
-      - C:/Users/vgrib/.ollama:/root/.ollama
+      - ollama-models:/root/.ollama
     environment:
       - CUDA_VISIBLE_DEVICES=${GPU_ID:-0}
       - OLLAMA_FLASH_ATTENTION=1
@@ -56,3 +56,8 @@ services:
 
 networks:
   ai-net:
+
+volumes:
+  ollama-models:
+    name: ai-stack-ollama-models
+    external: true
