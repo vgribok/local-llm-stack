@@ -204,6 +204,13 @@ def _trace_id_from_request(request: Request) -> str:
     return inbound.strip() if inbound and inbound.strip() else uuid.uuid4().hex[:12]
 
 
+def _model_from_body(body: Optional[dict]) -> str:
+    """Extract the primary model identifier used by Ollama API requests."""
+    if not isinstance(body, dict):
+        return ""
+    return body.get("model") or body.get("name") or ""
+
+
 def _decision_log(
     trace_id: str,
     *,
@@ -542,4 +549,10 @@ async def passthrough(path: str, request: Request):
         body = json.loads(raw) if raw else None
     except Exception:
         body = None
-    return await _forward(request, raw, body, trace_id)
+
+    model = _model_from_body(body)
+    target = await _backend_for_model(model) if model else UPSTREAM_URL
+    if body is not None:
+        body = _apply_classifier_runtime(body)
+        raw = json.dumps(body).encode("utf-8")
+    return await _forward(request, raw, body, trace_id, target_base=target)

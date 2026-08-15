@@ -197,6 +197,18 @@ class TestClassifierRuntime(unittest.TestCase):
         self.assertNotIn("keep_alive", result)
 
 
+class TestModelFromBody(unittest.TestCase):
+    def test_model_field(self):
+        self.assertEqual(app_mod._model_from_body({"model": "granite4.1:3b"}), "granite4.1:3b")
+
+    def test_name_field(self):
+        self.assertEqual(app_mod._model_from_body({"name": "granite4.1:3b"}), "granite4.1:3b")
+
+    def test_missing_or_invalid_body(self):
+        self.assertEqual(app_mod._model_from_body(None), "")
+        self.assertEqual(app_mod._model_from_body([]), "")
+
+
 # ---------------------------------------------------------------------------
 # Model registry tests (httpx mocked)
 # ---------------------------------------------------------------------------
@@ -331,6 +343,53 @@ class TestChatRoutingSkipsThinkingForSmallModels(unittest.IsolatedAsyncioTestCas
             await app_mod.chat(request)
 
         self.assertTrue(think_called.get("yes"), "_maybe_set_think should have been called")
+
+
+class TestPassthroughRouting(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        app_mod._model_backend.clear()
+
+    async def test_model_bearing_request_routes_to_small(self):
+        app_mod._model_backend["nomic-embed-text"] = SMALL
+        captured = {}
+
+        async def fake_forward(request, body_bytes, body_obj, trace_id, *, target_base=BIG):
+            captured["target"] = target_base
+            captured["body"] = json.loads(body_bytes)
+            return MagicMock(status_code=200)
+
+        body = {"model": "nomic-embed-text", "input": "hello"}
+        request = MagicMock()
+        request.body = AsyncMock(return_value=json.dumps(body).encode())
+        request.headers = {}
+        request.query_params = {}
+        request.url.path = "/api/embed"
+        request.method = "POST"
+
+        with patch.object(app_mod, "_forward", fake_forward):
+            await app_mod.passthrough("api/embed", request)
+
+        self.assertEqual(captured["target"], SMALL)
+        self.assertEqual(captured["body"], body)
+
+    async def test_request_without_model_defaults_to_big(self):
+        captured = {}
+
+        async def fake_forward(request, body_bytes, body_obj, trace_id, *, target_base=BIG):
+            captured["target"] = target_base
+            return MagicMock(status_code=200)
+
+        request = MagicMock()
+        request.body = AsyncMock(return_value=b"")
+        request.headers = {}
+        request.query_params = {}
+        request.url.path = "/api/version"
+        request.method = "GET"
+
+        with patch.object(app_mod, "_forward", fake_forward):
+            await app_mod.passthrough("api/version", request)
+
+        self.assertEqual(captured["target"], BIG)
 
 
 if __name__ == "__main__":
