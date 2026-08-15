@@ -199,7 +199,7 @@ The agent gets model-aware routing, adaptive thinking classification, and the co
 
 **Why bare-metal Ollama on macOS** — Apple Silicon's unified memory architecture means there's no GPU/CPU memory split to manage. Running Ollama natively gives the best performance and simplest setup. Docker containers would add overhead without benefit.
 
-**think-router is a unified gateway** — It merges `/api/tags` from all backends, routes each request to the backend that holds the model, and applies adaptive thinking classification. On macOS and bare-metal Windows, both "big" and "small" config URLs point to the same host Ollama instance — the router handles this gracefully. The classifier (`granite4.1:3b`) adds ~50–200ms per request; thinking is only enabled when the prompt warrants it.
+**think-router is a unified gateway** — It merges `/api/tags` from all backends, routes each request to the backend that holds the model, and applies adaptive thinking classification. On macOS and bare-metal Windows, both "big" and "small" config URLs point to the same host Ollama instance — the router deduplicates that URL. Classifier warmup runs in the background when the router starts, so it does not delay readiness. A warm classification is normally quick, but a cold or overloaded classifier can take up to `CLASSIFIER_TIMEOUT_S` (8 seconds by default) before the router falls back to thinking-on.
 
 **Port 11435 on bare-metal configurations** — think-router exposes port 11435 (not 11434) when using the bare-metal overlay, since host Ollama already occupies 11434. This applies to both macOS and bare-metal Windows.
 
@@ -226,11 +226,11 @@ The agent gets model-aware routing, adaptive thinking classification, and the co
 
 - **Validate changes** — Run `pwsh ./validate.ps1` to check PowerShell/Python syntax, router tests, and every Compose platform configuration without changing running services.
 
-- **Cold model loads** — First use loads weights into memory. `OLLAMA_KEEP_ALIVE=24h` keeps models warm between requests.
+- **Cold model loads** — First use loads weights into memory. Windows Docker Ollama instances set `OLLAMA_KEEP_ALIVE=24h`; the router also sends `keep_alive=24h` when warming or invoking the classifier. Bare-metal Ollama lifetime remains controlled by the native Ollama configuration.
 - **Recreating Open WebUI invalidates browser sessions** — Sign in again after compose changes.
 - **Per-chat web search toggle** — `ENABLE_WEB_SEARCH=True` makes the feature available; toggle it per conversation via the `+` icon.
 - **think-router is rebuilt on every `./ollama.ps1 start`** — Changes to `think-router/app.py` take effect automatically.
-- **Models pulled after startup are discovered automatically** — think-router refreshes its registry on first request for an unknown model.
+- **Models pulled after startup are discovered automatically** — Model-aware requests refresh the routing registry when its TTL has expired (`MODEL_REGISTRY_TTL_S`, 15 seconds by default). A newly pulled model can therefore take up to one TTL interval to become routable to its owning backend.
 
 ## Troubleshooting
 
@@ -254,6 +254,10 @@ Run `./ollama.ps1` with no arguments to see command options and get an interacti
 ```bash
 ./ollama.ps1 help              # show detailed help
 ./ollama.ps1 start             # start stack (auto-detects platform, GPU count, bare-metal Ollama)
+./ollama.ps1 up                # alias for start
+./ollama.ps1 stop              # stop the Docker Compose stack; persistent data is preserved
+./ollama.ps1 restart           # stop, then start the Docker Compose stack
+./ollama.ps1 migrate-storage   # Windows Docker only: migrate legacy host model stores to named volumes
 ./ollama.ps1 diag              # detect localhost/127.0.0.1/::1 endpoint conflicts on Ollama ports
 ./ollama.ps1 version           # show Ollama version per backend
 ./ollama.ps1 list              # list models (all backends)
