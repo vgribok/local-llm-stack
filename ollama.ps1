@@ -18,10 +18,12 @@
     ./ollama.ps1 ps                       # show loaded models
     ./ollama.ps1 rm granite4.1:3b         # delete model from disk
     ./ollama.ps1 stop qwen3.6:27b         # unload from VRAM
+    ./ollama.ps1 stop                     # docker compose down (preserves data)
     ./ollama.ps1 run granite4.1:3b        # interactive chat
     ./ollama.ps1 size qwen3:32b           # check registry size without pulling
     ./ollama.ps1 start                    # docker compose up, wait healthy, open OWUI
     ./ollama.ps1 up                       # synonym for 'start'
+    ./ollama.ps1 restart                  # stop, then start the Docker Compose stack
 #>
 
 [CmdletBinding()]
@@ -70,19 +72,20 @@ $OpenWebUIImageRef = $ImagePins["OPEN_WEBUI_IMAGE"]
 $OllamaImageDigest = ($OllamaImageRef -split "@", 2)[1]
 $OpenWebUIImageDigest = ($OpenWebUIImageRef -split "@", 2)[1]
 
-$ValidCommands = @("pull", "list", "ps", "rm", "stop", "show", "run", "size", "version", "start", "up", "diag", "help")
+$ValidCommands = @("pull", "list", "ps", "rm", "stop", "show", "run", "size", "version", "start", "up", "restart", "diag", "help")
 $CommandDescriptions = [ordered]@{
     pull    = "Pull a model (auto-routed to backend when applicable)."
     list    = "List installed models across backend(s)."
     ps      = "Show currently loaded/running models."
     rm      = "Delete a model from disk."
-    stop    = "Unload a model from memory/VRAM."
+    stop    = "Unload a model, or stop the Docker Compose stack when no model is given."
     show    = "Show metadata/details for a model."
     run     = "Run interactive chat with a model (pulls first if needed)."
     size    = "Query registry size for a model (without pulling)."
     version = "Show Ollama version per backend."
     start   = "Start stack with selected compose files and diagnostics."
     up      = "Alias for start."
+    restart = "Stop, then start the Docker Compose stack."
     diag    = "Run loopback/native-conflict diagnostics."
     help    = "Show this help with command reference."
 }
@@ -132,6 +135,8 @@ function Show-WrapperHelp {
 
     Write-Host "EXAMPLES"
     Write-Host "    ./ollama.ps1 start"
+    Write-Host "    ./ollama.ps1 stop"
+    Write-Host "    ./ollama.ps1 restart"
     Write-Host "    ./ollama.ps1 list"
     Write-Host "    ./ollama.ps1 pull qwen3.6:27b"
     Write-Host "    ./ollama.ps1 diag   # loopback/native-conflict diagnostics"
@@ -816,14 +821,7 @@ function Invoke-SharedDiagnostics {
 
 }
 
-function Start-Stack {
-    <#
-    .SYNOPSIS
-        Start the Docker Compose stack with platform-appropriate compose files.
-    #>
-    Write-Host "Running preflight loopback diagnostics..." -ForegroundColor DarkGray
-    Invoke-SharedDiagnostics
-
+function Get-ComposeArguments {
     $composeArgs = @()
     $localEnvPath = Join-Path $PSScriptRoot ".env"
     if (Test-Path -LiteralPath $localEnvPath) {
@@ -834,6 +832,19 @@ function Start-Stack {
     foreach ($f in $Config.ComposeFiles) {
         $composeArgs += @("-f", (Join-Path $PSScriptRoot $f))
     }
+
+    return $composeArgs
+}
+
+function Start-Stack {
+    <#
+    .SYNOPSIS
+        Start the Docker Compose stack with platform-appropriate compose files.
+    #>
+    Write-Host "Running preflight loopback diagnostics..." -ForegroundColor DarkGray
+    Invoke-SharedDiagnostics
+
+    $composeArgs = @(Get-ComposeArguments)
 
     Write-Host "==> docker compose $($composeArgs -join ' ') up -d --build --remove-orphans --wait" -ForegroundColor DarkGray
     & docker compose @composeArgs up -d --build --remove-orphans --wait
@@ -854,6 +865,23 @@ function Start-Stack {
     else {
         Start-Process $Config.WebUiUrl
     }
+}
+
+function Stop-Stack {
+    <#
+    .SYNOPSIS
+        Stop and remove the platform-appropriate Docker Compose stack.
+    #>
+    $composeArgs = @(Get-ComposeArguments)
+
+    Write-Host "==> docker compose $($composeArgs -join ' ') down --remove-orphans" -ForegroundColor DarkGray
+    & docker compose @composeArgs down --remove-orphans
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "docker compose down failed (exit $LASTEXITCODE)."
+    }
+
+    Write-Host "Docker Compose stack stopped. Persistent data was preserved." -ForegroundColor Green
 }
 
 #endregion
@@ -924,9 +952,13 @@ switch ($Command) {
     }
 
     "stop" {
-        if (-not $Model) { throw "Model name required: ./ollama.ps1 stop <model>" }
-        $target = Resolve-ExistingBackend $Model
-        Invoke-Ollama -BackendKey $target -Arguments @("stop", $Model)
+        if ($Model) {
+            $target = Resolve-ExistingBackend $Model
+            Invoke-Ollama -BackendKey $target -Arguments @("stop", $Model)
+        }
+        else {
+            Stop-Stack
+        }
     }
 
     "show" {
@@ -973,6 +1005,11 @@ switch ($Command) {
     }
 
     { $_ -in "start", "up" } {
+        Start-Stack
+    }
+
+    "restart" {
+        Stop-Stack
         Start-Stack
     }
 }
