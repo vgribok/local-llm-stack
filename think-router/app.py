@@ -27,7 +27,7 @@ import os
 import re
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Optional
 
 import httpx
@@ -39,6 +39,8 @@ SMALL_UPSTREAM_URL = os.environ.get("SMALL_UPSTREAM_URL", "http://ollama-small:1
 CLASSIFIER_URL     = os.environ.get("CLASSIFIER_URL",     "http://ollama-small:11434")
 CLASSIFIER_MODEL   = os.environ.get("CLASSIFIER_MODEL",   "granite4.1:3b")
 CLASSIFIER_TIMEOUT_S = float(os.environ.get("CLASSIFIER_TIMEOUT_S", "8"))
+CLASSIFIER_WARMUP_TIMEOUT_S = float(os.environ.get("CLASSIFIER_WARMUP_TIMEOUT_S", "300"))
+CLASSIFIER_WARMUP_RETRIES = int(os.environ.get("CLASSIFIER_WARMUP_RETRIES", "3"))
 MODEL_REGISTRY_TTL_S = float(os.environ.get("MODEL_REGISTRY_TTL_S", "15"))
 
 # Context window for the classifier request. Without it, Ollama applies its
@@ -120,6 +122,54 @@ HIGH — complex reasoning, non-trivial algorithms or code, planning, architectu
 Answer (NO, LOW, or HIGH):"""
 
 
+def _classifier_payload(prompt: str, *, num_predict: int = 4) -> dict:
+    return {
+        "model": CLASSIFIER_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "num_predict": num_predict,
+            "temperature": 0.0,
+            "num_ctx": CLASSIFIER_NUM_CTX,
+        },
+        "keep_alive": "24h",
+    }
+
+
+async def _warm_classifier() -> None:
+    """Load the classifier runner in the background before the first chat."""
+    for attempt in range(1, CLASSIFIER_WARMUP_RETRIES + 1):
+        started = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(timeout=CLASSIFIER_WARMUP_TIMEOUT_S) as client:
+                r = await client.post(
+                    f"{CLASSIFIER_URL}/api/generate",
+                    json=_classifier_payload("Reply with exactly: NO", num_predict=1),
+                )
+                r.raise_for_status()
+            log.info(
+                "classifier warmup complete model=%s attempt=%d elapsed_ms=%.1f",
+                CLASSIFIER_MODEL,
+                attempt,
+                (time.perf_counter() - started) * 1000,
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning(
+                "classifier warmup failed type=%s detail=%r model=%s attempt=%d/%d elapsed_ms=%.1f",
+                type(e).__name__,
+                e,
+                CLASSIFIER_MODEL,
+                attempt,
+                CLASSIFIER_WARMUP_RETRIES,
+                (time.perf_counter() - started) * 1000,
+            )
+            if attempt < CLASSIFIER_WARMUP_RETRIES:
+                await asyncio.sleep(5)
+
+
 async def _refresh_model_registry(*, force: bool = False) -> None:
     """Query /api/tags on both backends and rebuild the model→backend map."""
     global _registry_refreshed_at
@@ -176,7 +226,14 @@ async def _backend_for_model(model: str) -> str:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await _refresh_model_registry(force=True)
-    yield
+    warmup_task = asyncio.create_task(_warm_classifier())
+    try:
+        yield
+    finally:
+        if not warmup_task.done():
+            warmup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await warmup_task
 
 
 app = FastAPI(lifespan=lifespan)
@@ -270,17 +327,7 @@ async def _classify(prompt: str) -> Optional[str]:
         async with httpx.AsyncClient(timeout=CLASSIFIER_TIMEOUT_S) as client:
             r = await client.post(
                 f"{CLASSIFIER_URL}/api/generate",
-                json={
-                    "model": CLASSIFIER_MODEL,
-                    "prompt": CLASSIFIER_PROMPT.format(prompt=snippet),
-                    "stream": False,
-                    "options": {
-                        "num_predict": 4,
-                        "temperature": 0.0,
-                        "num_ctx": CLASSIFIER_NUM_CTX,
-                    },
-                    "keep_alive": "24h",
-                },
+                json=_classifier_payload(CLASSIFIER_PROMPT.format(prompt=snippet)),
             )
             r.raise_for_status()
             answer = (r.json().get("response") or "").strip().upper()

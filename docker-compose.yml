@@ -19,6 +19,8 @@ services:
       - CLASSIFIER_URL=${CLASSIFIER_URL:-http://ollama-small:11434}
       - CLASSIFIER_MODEL=${CLASSIFIER_MODEL:-granite4.1:3b}
       - CLASSIFIER_TIMEOUT_S=${CLASSIFIER_TIMEOUT_S:-8}
+      - CLASSIFIER_WARMUP_TIMEOUT_S=${CLASSIFIER_WARMUP_TIMEOUT_S:-300}
+      - CLASSIFIER_WARMUP_RETRIES=${CLASSIFIER_WARMUP_RETRIES:-3}
       # Caps the classifier's KV cache. Unset, Ollama sizes the context from
       # available VRAM (up to 131072) for what is a ~600-token prompt.
       - CLASSIFIER_NUM_CTX=${CLASSIFIER_NUM_CTX:-4096}

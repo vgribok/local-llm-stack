@@ -197,6 +197,28 @@ class TestClassifierRuntime(unittest.TestCase):
         self.assertNotIn("keep_alive", result)
 
 
+class TestClassifierWarmup(unittest.IsolatedAsyncioTestCase):
+    async def test_warmup_uses_stable_runtime_profile(self):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as MockClient:
+            inst = AsyncMock()
+            inst.__aenter__ = AsyncMock(return_value=inst)
+            inst.__aexit__ = AsyncMock(return_value=False)
+            inst.post = AsyncMock(return_value=response)
+            MockClient.return_value = inst
+
+            await app_mod._warm_classifier()
+
+        _, kwargs = inst.post.call_args
+        payload = kwargs["json"]
+        self.assertEqual(payload["model"], app_mod.CLASSIFIER_MODEL)
+        self.assertEqual(payload["options"]["num_ctx"], app_mod.CLASSIFIER_NUM_CTX)
+        self.assertEqual(payload["options"]["num_predict"], 1)
+        self.assertEqual(payload["keep_alive"], "24h")
+
+
 class TestModelFromBody(unittest.TestCase):
     def test_model_field(self):
         self.assertEqual(app_mod._model_from_body({"model": "granite4.1:3b"}), "granite4.1:3b")
