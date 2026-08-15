@@ -175,6 +175,28 @@ class TestIsStreaming(unittest.TestCase):
         self.assertTrue(app_mod._is_streaming({"stream": True}))
 
 
+class TestClassifierRuntime(unittest.TestCase):
+    def test_classifier_task_uses_classifier_context_and_keep_alive(self):
+        body = {
+            "model": app_mod.CLASSIFIER_MODEL,
+            "options": {"num_ctx": 16384, "temperature": 0.2},
+        }
+
+        result = app_mod._apply_classifier_runtime(body)
+
+        self.assertEqual(result["options"]["num_ctx"], app_mod.CLASSIFIER_NUM_CTX)
+        self.assertEqual(result["options"]["temperature"], 0.2)
+        self.assertEqual(result["keep_alive"], "24h")
+
+    def test_other_models_are_unchanged(self):
+        body = {"model": "qwen3.6:35b", "options": {"num_ctx": 32768}}
+
+        result = app_mod._apply_classifier_runtime(body)
+
+        self.assertEqual(result, body)
+        self.assertNotIn("keep_alive", result)
+
+
 # ---------------------------------------------------------------------------
 # Model registry tests (httpx mocked)
 # ---------------------------------------------------------------------------

@@ -268,6 +268,20 @@ async def _classify(prompt: str) -> Optional[str]:
         return None
 
 
+def _apply_classifier_runtime(body: dict) -> dict:
+    """Keep task requests for the classifier on its existing Ollama runner."""
+    if body.get("model") != CLASSIFIER_MODEL:
+        return body
+
+    options = body.get("options")
+    if not isinstance(options, dict):
+        options = {}
+        body["options"] = options
+    options["num_ctx"] = CLASSIFIER_NUM_CTX
+    body["keep_alive"] = "24h"
+    return body
+
+
 async def _is_thinking_capable(model: str) -> bool:
     """Look up whether a big-GPU model has 'thinking' in its capabilities. Cached."""
     if model in EXCLUDE_MODELS:
@@ -510,6 +524,7 @@ async def chat(request: Request):
 
     model = body.get("model", "")
     target = await _backend_for_model(model) if model else UPSTREAM_URL
+    body = _apply_classifier_runtime(body)
 
     if target == UPSTREAM_URL:
         body = await _maybe_set_think(body, trace_id)
