@@ -213,6 +213,8 @@ The agent gets model-aware routing, adaptive thinking classification, and the co
 
 ## Operational notes
 
+- **Validate changes** — Run `pwsh ./validate.ps1` to check PowerShell/Python syntax, router tests, and every Compose platform configuration without changing running services.
+
 - **Cold model loads** — First use loads weights into memory. `OLLAMA_KEEP_ALIVE=24h` keeps models warm between requests.
 - **Recreating Open WebUI invalidates browser sessions** — Sign in again after compose changes.
 - **Per-chat web search toggle** — `ENABLE_WEB_SEARCH=True` makes the feature available; toggle it per conversation via the `+` icon.
